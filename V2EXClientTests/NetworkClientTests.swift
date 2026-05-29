@@ -272,6 +272,65 @@ final class NetworkClientTests: XCTestCase {
         XCTAssertEqual(topics.map(\.id), [101])
         XCTAssertEqual(topics.first?.node.name, "programmer")
     }
+
+    func testBundledNodeBuildsNavatarIconURL() {
+        let node = Node(id: 300, name: "programmer", title: "程序员", topics: nil)
+
+        XCTAssertEqual(
+            node.iconURL?.absoluteString,
+            "https://cdn.v2ex.com/navatar/94f6/d7e0/300_normal.png"
+        )
+        XCTAssertEqual(node.path, "/go/programmer")
+    }
+
+    func testAllNodesMergesAPIDataWithBundledCatalog() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        MockURLProtocol.handler = { request in
+            let body = """
+            [
+              {
+                "id": 300,
+                "name": "programmer",
+                "title": "程序员",
+                "topics": 42,
+                "avatar_normal": "/static/img/node_default_normal.png"
+              }
+            ]
+            """
+
+            return (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data(body.utf8)
+            )
+        }
+
+        let service = V2EXService(
+            client: NetworkClient(session: URLSession(configuration: configuration)),
+            cache: CacheStore(directory: directory)
+        )
+
+        let nodes = try await service.allNodes(refresh: true)
+        let programmer = try XCTUnwrap(nodes.first { $0.name == "programmer" })
+
+        XCTAssertEqual(programmer.topics, 42)
+        XCTAssertEqual(
+            programmer.iconURL?.absoluteString,
+            "https://www.v2ex.com/static/img/node_default_normal.png"
+        )
+        XCTAssertTrue(nodes.contains { $0.name == "qna" })
+    }
 }
 
 private final class MockURLProtocol: URLProtocol {

@@ -103,3 +103,26 @@ struct AvatarView: View {
         .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }
+
+struct NodeIconView: View {
+    let url: URL?
+    let size: CGFloat
+    var cornerRadius: CGFloat = 6
+
+    var body: some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case .success(let image):
+                image
+                    .resizable()
+                    .scaledToFill()
+            default:
+                Image(systemName: "number.square.fill")
+                    .resizable()
+                    .foregroundStyle(.secondary.opacity(0.5))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+    }
+}

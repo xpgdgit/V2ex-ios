@@ -18,6 +18,12 @@ final class SearchViewModel: ObservableObject {
     }
 
     func load(refresh: Bool = false) async {
+        if nodes.isEmpty && !refresh {
+            nodes = service.bundledNodes()
+            applySearch()
+            state = results.isEmpty ? .loading : .loaded
+        }
+
         if nodes.isEmpty {
             state = .loading
         }
@@ -27,8 +33,12 @@ final class SearchViewModel: ObservableObject {
             applySearch()
             state = results.isEmpty ? .empty : .loaded
         } catch {
-            results = []
-            state = .failed(error.localizedDescription)
+            if nodes.isEmpty {
+                results = []
+                state = .failed(error.localizedDescription)
+            } else {
+                state = .loaded
+            }
         }
     }
 

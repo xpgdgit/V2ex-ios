@@ -22,16 +22,22 @@ struct NodeView: View {
                 List {
                     if let node = viewModel.node {
                         Section {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(node.title)
-                                    .font(.title2.weight(.semibold))
-                                Text("/go/\(node.name)")
-                                    .foregroundStyle(.secondary)
-                                if let topics = node.topics {
-                                    Text("\(topics) 个主题")
-                                        .font(.caption)
+                            HStack(spacing: 14) {
+                                NodeIconView(url: node.iconURL, size: 52, cornerRadius: 8)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(node.title)
+                                        .font(.title2.weight(.semibold))
+                                    Text(node.path)
                                         .foregroundStyle(.secondary)
+                                    if let topics = node.topics {
+                                        Text("\(topics.formatted()) 个主题")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
+
+                                Spacer(minLength: 0)
                             }
                             .padding(.vertical, 6)
                         }

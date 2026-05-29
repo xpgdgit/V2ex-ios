@@ -5,6 +5,7 @@ final class V2EXService {
     private let cache: CacheStore
     private let parser: TopicDetailParser
     private let nodeTopicListParser = NodeTopicListParser()
+    private let nodeCatalog = NodeCatalog.shared
     private let baseURL = URL(string: "https://www.v2ex.com")!
 
     init(
@@ -64,7 +65,7 @@ final class V2EXService {
     func node(named name: String, refresh: Bool = false) async throws -> Node {
         let cacheKey = "node-\(name)"
         if !refresh, let cached: Node = await cache.value(for: cacheKey) {
-            return cached
+            return nodeCatalog.merge(cached)
         }
 
         var components = URLComponents(url: baseURL.appending(path: "/api/nodes/show.json"), resolvingAgainstBaseURL: false)!
@@ -73,22 +74,26 @@ final class V2EXService {
             components.url!,
             cachePolicy: cachePolicy(refresh: refresh)
         )
-        let node = dto.node
+        let node = nodeCatalog.merge(dto.node)
         await cache.set(node, for: cacheKey)
         return node
+    }
+
+    func bundledNodes() -> [Node] {
+        nodeCatalog.nodes
     }
 
     func allNodes(refresh: Bool = false) async throws -> [Node] {
         let cacheKey = "nodes-all"
         if !refresh, let cached: [Node] = await cache.value(for: cacheKey) {
-            return cached
+            return nodeCatalog.merged(cached)
         }
 
         let dtos: [LegacyNodeDTO] = try await client.get(
             baseURL.appending(path: "/api/nodes/all.json"),
             cachePolicy: cachePolicy(refresh: refresh)
         )
-        let nodes = dtos.map(\.node)
+        let nodes = nodeCatalog.merged(dtos.map(\.node))
         await cache.set(nodes, for: cacheKey)
         return nodes
     }
@@ -339,9 +344,29 @@ private struct LegacyNodeDTO: Decodable {
     let name: String
     let title: String
     let topics: Int?
+    let avatarNormal: String?
 
     var node: Node {
-        Node(id: id, name: name, title: title.decodedHTML, topics: topics)
+        Node(
+            id: id,
+            name: name,
+            title: title.decodedHTML,
+            topics: topics,
+            avatarURL: normalizedAvatarURL
+        )
+    }
+
+    private var normalizedAvatarURL: URL? {
+        guard let avatarNormal, !avatarNormal.isEmpty else {
+            return nil
+        }
+        if avatarNormal.hasPrefix("//") {
+            return URL(string: "https:\(avatarNormal)")
+        }
+        if avatarNormal.hasPrefix("/") {
+            return URL(string: "https://www.v2ex.com\(avatarNormal)")
+        }
+        return URL(string: avatarNormal)
     }
 }
 
@@ -356,12 +381,12 @@ struct NodeTopicListParser: Sendable {
             topics: pageTopicCount(in: html)
         )
 
-        let schemaTopics = parseSchemaTopics(html: html, fallbackNode: fallbackNode)
-        if !schemaTopics.isEmpty {
-            return schemaTopics
+        let cellTopics = parseCellTopics(html: html, fallbackNode: fallbackNode)
+        if !cellTopics.isEmpty {
+            return cellTopics
         }
 
-        return parseCellTopics(html: html, fallbackNode: fallbackNode)
+        return parseSchemaTopics(html: html, fallbackNode: fallbackNode)
     }
 
     func parseCells(html: String, fallbackNodeName: String) -> [Topic] {

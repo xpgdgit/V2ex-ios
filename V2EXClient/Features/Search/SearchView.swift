@@ -50,25 +50,33 @@ private struct NodeSearchRow: View {
     let node: Node
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text(node.title)
-                    .font(.headline)
-                    .lineLimit(1)
+        HStack(spacing: 12) {
+            NodeIconView(url: node.iconURL, size: 40)
 
-                Spacer(minLength: 8)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(node.title)
+                        .font(.headline)
+                        .lineLimit(1)
 
-                if let topics = node.topics {
-                    Label("\(topics)", systemImage: "text.bubble")
+                    Spacer(minLength: 8)
+
+                    if let topics = node.topics {
+                        HStack(spacing: 4) {
+                            Image(systemName: "text.bubble")
+                            Text(topics.formatted())
+                                .monospacedDigit()
+                        }
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    }
                 }
-            }
 
-            Text("/go/\(node.name)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text(node.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
     }
 }

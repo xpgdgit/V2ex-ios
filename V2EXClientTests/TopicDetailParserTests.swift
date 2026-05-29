@@ -303,6 +303,48 @@ final class TopicDetailParserTests: XCTestCase {
         XCTAssertEqual(topics[0].node.title, "Apple")
     }
 
+    func testNodeTopicListParserPrefersCellsOverSchemaForAvatars() {
+        let html = """
+        <title>V2EX › Apple</title>
+        <script type="application/ld+json">
+        {
+          "mainEntity": {
+            "numberOfItems": 30658,
+            "itemListElement": [
+              {
+                "item": {
+                  "url": "https://www.v2ex.com/t/1215000",
+                  "headline": "计划外，换机请教",
+                  "commentCount": 5,
+                  "author": { "name": "EDD" }
+                }
+              }
+            ]
+          }
+        }
+        </script>
+        <div class="cell from_1 t_1215000">
+          <table>
+            <tr>
+              <td><a href="/member/EDD"><img src="//cdn.v2ex.com/avatar/edd.png" class="avatar" data-uid="100" /></a></td>
+              <td>
+                <span class="item_title"><a href="/t/1215000#reply5" class="topic-link">计划外，换机请教</a></span>
+                <span class="topic_info"><strong><a href="/member/EDD">EDD</a></strong></span>
+              </td>
+              <td><a href="/t/1215000#reply5" class="count_livid">5</a></td>
+            </tr>
+          </table>
+        </div>
+        """
+
+        let topics = NodeTopicListParser().parse(html: html, fallbackNodeName: "apple")
+
+        XCTAssertEqual(topics.count, 1)
+        XCTAssertEqual(topics[0].member.id, 100)
+        XCTAssertEqual(topics[0].member.avatarURL, URL(string: "https://cdn.v2ex.com/avatar/edd.png"))
+        XCTAssertEqual(topics[0].node.topics, 30658)
+    }
+
     func testCategoryTopicListParserReadsTopicCellNodes() {
         let html = """
         <div class="cell from_1 t_1214000">

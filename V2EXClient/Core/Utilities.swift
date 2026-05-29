@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SwiftUI
 
@@ -30,6 +31,12 @@ enum HTMLImageStyle: Equatable {
 }
 
 extension String {
+    static func md5HexDigest(for value: String) -> String {
+        let data = Data(value.utf8)
+        let digest = Insecure.MD5.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     var normalizedWhitespace: String {
         replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)

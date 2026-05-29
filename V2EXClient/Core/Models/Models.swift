@@ -27,6 +27,36 @@ struct Node: Identifiable, Codable, Hashable {
     let name: String
     let title: String
     let topics: Int?
+    let avatarURL: URL?
+
+    init(id: Int?, name: String, title: String, topics: Int?, avatarURL: URL? = nil) {
+        self.id = id
+        self.name = name
+        self.title = title
+        self.topics = topics
+        self.avatarURL = avatarURL
+    }
+
+    var path: String {
+        "/go/\(name)"
+    }
+
+    var iconURL: URL? {
+        if let avatarURL {
+            return avatarURL
+        }
+        guard let id else { return nil }
+        return Self.navatarURL(for: id)
+    }
+
+    private static func navatarURL(for id: Int) -> URL? {
+        let digest = String.md5HexDigest(for: String(id))
+        let first = String(digest.prefix(4))
+        let secondStart = digest.index(digest.startIndex, offsetBy: 4)
+        let secondEnd = digest.index(digest.startIndex, offsetBy: 8)
+        let second = String(digest[secondStart..<secondEnd])
+        return URL(string: "https://cdn.v2ex.com/navatar/\(first)/\(second)/\(id)_normal.png")
+    }
 }
 
 struct Reply: Identifiable, Codable, Hashable {
