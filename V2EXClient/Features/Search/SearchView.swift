@@ -47,6 +47,8 @@ struct SearchView: View {
 }
 
 private struct NodeSearchRow: View {
+    @EnvironmentObject private var settings: SettingsStore
+
     let node: Node
 
     var body: some View {
@@ -56,7 +58,7 @@ private struct NodeSearchRow: View {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
                     Text(node.title)
-                        .font(.headline)
+                        .font(settings.contentFont(size: 17, weight: .semibold))
                         .lineLimit(1)
 
                     Spacer(minLength: 8)
@@ -67,13 +69,13 @@ private struct NodeSearchRow: View {
                             Text(topics.formatted())
                                 .monospacedDigit()
                         }
-                        .font(.caption)
+                        .font(settings.contentFont(size: 12))
                         .foregroundStyle(.secondary)
                     }
                 }
 
                 Text(node.path)
-                    .font(.caption)
+                    .font(settings.contentFont(size: 12))
                     .foregroundStyle(.secondary)
             }
         }

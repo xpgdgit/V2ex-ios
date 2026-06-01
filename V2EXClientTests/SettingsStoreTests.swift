@@ -15,4 +15,12 @@ final class SettingsStoreTests: XCTestCase {
         store.appearanceMode = .light
         XCTAssertEqual(store.colorScheme, .light)
     }
+
+    func testContentFontScaleCalculatesScaledSize() {
+        let store = SettingsStore()
+
+        store.fontScale = 1.2
+
+        XCTAssertEqual(store.scaledContentSize(10), 12, accuracy: 0.001)
+    }
 }

@@ -210,6 +210,118 @@ final class NetworkClientTests: XCTestCase {
         XCTAssertEqual(callCount, 2)
     }
 
+    func testTopicDetailExposesInMemoryCacheForImmediateReuse() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+
+        var callCount = 0
+        MockURLProtocol.handler = { request in
+            callCount += 1
+            let html = """
+            <span class="gray">By alice at 1h ago · 1 views</span>
+            <div class="topic_content">正文</div>
+            """
+
+            return (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data(html.utf8)
+            )
+        }
+
+        let service = V2EXService(
+            client: NetworkClient(session: URLSession(configuration: configuration)),
+            cache: CacheStore(directory: directory)
+        )
+        let topic = Topic(
+            id: 125,
+            title: "Cache",
+            url: URL(string: "https://www.v2ex.com/t/125")!,
+            replies: 0,
+            member: Member(id: 1, username: "alice", avatarURL: nil, tagline: nil),
+            node: Node(id: 1, name: "swift", title: "Swift", topics: nil),
+            createdAt: nil,
+            lastReplyAt: nil
+        )
+
+        let loaded = try await service.topicDetail(for: topic)
+        let cached = try XCTUnwrap(service.cachedTopicDetail(for: topic))
+        let reused = try await service.topicDetail(for: topic)
+
+        XCTAssertEqual(loaded.contentHTML, "正文")
+        XCTAssertEqual(cached.contentHTML, "正文")
+        XCTAssertEqual(reused.contentHTML, "正文")
+        XCTAssertEqual(callCount, 1)
+    }
+
+    func testNodeTopicsExposeInMemoryCacheForImmediateReuse() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+
+        var callCount = 0
+        MockURLProtocol.handler = { request in
+            callCount += 1
+            let body: String
+            if request.url?.path == "/api/topics/show.json" {
+                body = """
+                [
+                  {
+                    "id": 201,
+                    "title": "Swift 主题",
+                    "url": "https://www.v2ex.com/t/201",
+                    "replies": 2,
+                    "member": {"id": 1, "username": "alice"},
+                    "node": {"id": 1, "name": "swift", "title": "Swift", "topics": 10},
+                    "created": 1760000000
+                  }
+                ]
+                """
+            } else {
+                body = "<html><body>empty</body></html>"
+            }
+
+            return (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!,
+                Data(body.utf8)
+            )
+        }
+
+        let service = V2EXService(
+            client: NetworkClient(session: URLSession(configuration: configuration)),
+            cache: CacheStore(directory: directory)
+        )
+
+        let loaded = try await service.nodeTopics(name: "swift")
+        let cached = try XCTUnwrap(service.cachedNodeTopics(name: "swift"))
+        let reused = try await service.nodeTopics(name: "swift")
+
+        XCTAssertEqual(loaded.map(\.id), [201])
+        XCTAssertEqual(cached.map(\.id), [201])
+        XCTAssertEqual(reused.map(\.id), [201])
+        XCTAssertEqual(callCount, 2)
+    }
+
     func testCategoryTopicsFallbackToLatestWhenWebParsingIsEmpty() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

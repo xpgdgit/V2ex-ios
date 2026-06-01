@@ -6,6 +6,7 @@ final class V2EXService {
     private let parser: TopicDetailParser
     private let nodeTopicListParser = NodeTopicListParser()
     private let nodeCatalog = NodeCatalog.shared
+    private let memoryCache = NSCache<NSString, AnyCacheBox>()
     private let baseURL = URL(string: "https://www.v2ex.com")!
 
     init(
@@ -19,8 +20,13 @@ final class V2EXService {
     }
 
     func topics(feed: TopicFeed, refresh: Bool = false) async throws -> [Topic] {
-        let cacheKey = "topics-\(feed.rawValue)"
+        let cacheKey = topicsCacheKey(feed: feed)
+        if !refresh, let cached: [Topic] = memoryValue(for: cacheKey) {
+            return cached
+        }
+
         if !refresh, let cached: [Topic] = await cache.value(for: cacheKey) {
+            setMemory(cached, for: cacheKey)
             return cached
         }
 
@@ -30,15 +36,34 @@ final class V2EXService {
             cachePolicy: cachePolicy(refresh: refresh)
         )
         let topics = dtos.compactMap { $0.topic }
+        setMemory(topics, for: cacheKey)
         await cache.set(topics, for: cacheKey)
         return topics
     }
 
+    func cachedTopicDetail(for topic: Topic) -> TopicDetail? {
+        guard let cached: TopicDetail = memoryValue(for: topicDetailCacheKey(for: topic)) else {
+            return nil
+        }
+
+        let cachedReplyCount = max(cached.topic.replies, cached.replies.count)
+        guard cachedReplyCount >= topic.replies else {
+            return nil
+        }
+
+        return cached
+    }
+
     func topicDetail(for topic: Topic, refresh: Bool = false) async throws -> TopicDetail {
-        let cacheKey = "topic-v5-\(topic.id)"
+        let cacheKey = topicDetailCacheKey(for: topic)
+        if !refresh, let cached = cachedTopicDetail(for: topic) {
+            return cached
+        }
+
         if !refresh, let cached: TopicDetail = await cache.value(for: cacheKey) {
             let cachedReplyCount = max(cached.topic.replies, cached.replies.count)
             if cachedReplyCount >= topic.replies {
+                setMemory(cached, for: cacheKey)
                 return cached
             }
         }
@@ -53,19 +78,33 @@ final class V2EXService {
     }
 
     func topicDetail(for topic: Topic, html: String, sourceURL: URL? = nil) async -> TopicDetail {
-        let cacheKey = "topic-v5-\(topic.id)"
+        let cacheKey = topicDetailCacheKey(for: topic)
         let parser = parser
         let detail = await Task.detached(priority: .userInitiated) {
             parser.parse(html: html, topic: topic, sourceURL: sourceURL ?? topic.webURL)
         }.value
+        setMemory(detail, for: cacheKey)
         await cache.set(detail, for: cacheKey)
         return detail
     }
 
+    func cachedNode(named name: String) -> Node? {
+        guard let cached: Node = memoryValue(for: nodeCacheKey(name: name)) else {
+            return nil
+        }
+        return nodeCatalog.merge(cached)
+    }
+
     func node(named name: String, refresh: Bool = false) async throws -> Node {
-        let cacheKey = "node-\(name)"
+        let cacheKey = nodeCacheKey(name: name)
+        if !refresh, let cached = cachedNode(named: name) {
+            return cached
+        }
+
         if !refresh, let cached: Node = await cache.value(for: cacheKey) {
-            return nodeCatalog.merge(cached)
+            let node = nodeCatalog.merge(cached)
+            setMemory(node, for: cacheKey)
+            return node
         }
 
         var components = URLComponents(url: baseURL.appending(path: "/api/nodes/show.json"), resolvingAgainstBaseURL: false)!
@@ -75,6 +114,7 @@ final class V2EXService {
             cachePolicy: cachePolicy(refresh: refresh)
         )
         let node = nodeCatalog.merge(dto.node)
+        setMemory(node, for: cacheKey)
         await cache.set(node, for: cacheKey)
         return node
     }
@@ -85,8 +125,14 @@ final class V2EXService {
 
     func allNodes(refresh: Bool = false) async throws -> [Node] {
         let cacheKey = "nodes-all"
-        if !refresh, let cached: [Node] = await cache.value(for: cacheKey) {
+        if !refresh, let cached: [Node] = memoryValue(for: cacheKey) {
             return nodeCatalog.merged(cached)
+        }
+
+        if !refresh, let cached: [Node] = await cache.value(for: cacheKey) {
+            let nodes = nodeCatalog.merged(cached)
+            setMemory(nodes, for: cacheKey)
+            return nodes
         }
 
         let dtos: [LegacyNodeDTO] = try await client.get(
@@ -94,14 +140,26 @@ final class V2EXService {
             cachePolicy: cachePolicy(refresh: refresh)
         )
         let nodes = nodeCatalog.merged(dtos.map(\.node))
+        setMemory(nodes, for: cacheKey)
         await cache.set(nodes, for: cacheKey)
         return nodes
     }
 
+    func cachedNodeTopics(name: String, page: Int = 1) -> [Topic]? {
+        memoryValue(for: nodeTopicsCacheKey(name: name, page: page))
+    }
+
     func nodeTopics(name: String, page: Int = 1, refresh: Bool = false) async throws -> [Topic] {
-        let cacheKey = "node-topics-web-\(name)-page-\(page)"
+        let cacheKey = nodeTopicsCacheKey(name: name, page: page)
+        if !refresh, let cached: [Topic] = memoryValue(for: cacheKey) {
+            if !cached.isEmpty || page > 1 {
+                return cached
+            }
+        }
+
         if !refresh, let cached: [Topic] = await cache.value(for: cacheKey) {
             if !cached.isEmpty || page > 1 {
+                setMemory(cached, for: cacheKey)
                 return cached
             }
         }
@@ -109,6 +167,7 @@ final class V2EXService {
         do {
             let topics = try await webNodeTopics(name: name, page: page, refresh: refresh)
             if !topics.isEmpty || page > 1 {
+                setMemory(topics, for: cacheKey)
                 await cache.set(topics, for: cacheKey)
                 return topics
             }
@@ -129,6 +188,7 @@ final class V2EXService {
                 )
                 let mapped = topics.compactMap(\.topic)
                 if !mapped.isEmpty {
+                    setMemory(mapped, for: cacheKey)
                     await cache.set(mapped, for: cacheKey)
                     return mapped
                 }
@@ -139,14 +199,26 @@ final class V2EXService {
 
         let latest = try await topics(feed: .latest, refresh: refresh)
         let filtered = latest.filter { $0.node.name.caseInsensitiveCompare(name) == .orderedSame }
+        setMemory(filtered, for: cacheKey)
         await cache.set(filtered, for: cacheKey)
         return filtered
     }
 
+    func cachedCategoryTopics(tab: String, page: Int = 1) -> [Topic]? {
+        memoryValue(for: categoryTopicsCacheKey(tab: tab, page: page))
+    }
+
     func categoryTopics(tab: String, page: Int = 1, refresh: Bool = false) async throws -> [Topic] {
-        let cacheKey = "category-topics-web-\(tab)-page-\(page)"
+        let cacheKey = categoryTopicsCacheKey(tab: tab, page: page)
+        if !refresh, let cached: [Topic] = memoryValue(for: cacheKey) {
+            if !cached.isEmpty || page > 1 {
+                return cached
+            }
+        }
+
         if !refresh, let cached: [Topic] = await cache.value(for: cacheKey) {
             if !cached.isEmpty || page > 1 {
+                setMemory(cached, for: cacheKey)
                 return cached
             }
         }
@@ -154,6 +226,7 @@ final class V2EXService {
         do {
             let topics = try await webCategoryTopics(tab: tab, page: page, refresh: refresh)
             if !topics.isEmpty || page > 1 {
+                setMemory(topics, for: cacheKey)
                 await cache.set(topics, for: cacheKey)
                 return topics
             }
@@ -172,17 +245,20 @@ final class V2EXService {
 
             if let fallbackFeed {
                 let topics = try await topics(feed: fallbackFeed, refresh: refresh)
+                setMemory(topics, for: cacheKey)
                 await cache.set(topics, for: cacheKey)
                 return topics
             }
 
             let fallbackTopics = try await categoryFallbackTopics(tab: tab, refresh: refresh)
             if !fallbackTopics.isEmpty {
+                setMemory(fallbackTopics, for: cacheKey)
                 await cache.set(fallbackTopics, for: cacheKey)
                 return fallbackTopics
             }
         }
 
+        setMemory([Topic](), for: cacheKey)
         await cache.set([Topic](), for: cacheKey)
         return []
     }
@@ -205,19 +281,53 @@ final class V2EXService {
     }
 
     func clearCache() async {
+        memoryCache.removeAllObjects()
         await cache.clear()
         URLCache.shared.removeAllCachedResponses()
+        await RemoteImageCache.shared.clear()
         await MainActor.run {
             NotificationCenter.default.post(name: .v2exCacheDidClear, object: nil)
         }
     }
 
     func cacheSizeBytes() async -> Int64 {
-        await cache.diskUsage() + Int64(URLCache.shared.currentDiskUsage)
+        let dataCacheSize = await cache.diskUsage()
+        let imageCacheSize = await RemoteImageCache.shared.diskUsage()
+        return dataCacheSize
+            + Int64(URLCache.shared.currentDiskUsage)
+            + imageCacheSize
     }
 
     private func cachePolicy(refresh: Bool) -> URLRequest.CachePolicy {
         refresh ? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy
+    }
+
+    private func memoryValue<T>(for key: String, as type: T.Type = T.self) -> T? {
+        memoryCache.object(forKey: key as NSString)?.value as? T
+    }
+
+    private func setMemory<T>(_ value: T, for key: String) {
+        memoryCache.setObject(AnyCacheBox(value), forKey: key as NSString)
+    }
+
+    private func topicsCacheKey(feed: TopicFeed) -> String {
+        "topics-\(feed.rawValue)"
+    }
+
+    private func topicDetailCacheKey(for topic: Topic) -> String {
+        "topic-v5-\(topic.id)"
+    }
+
+    private func nodeCacheKey(name: String) -> String {
+        "node-\(name)"
+    }
+
+    private func nodeTopicsCacheKey(name: String, page: Int) -> String {
+        "node-topics-web-\(name)-page-\(page)"
+    }
+
+    private func categoryTopicsCacheKey(tab: String, page: Int) -> String {
+        "category-topics-web-\(tab)-page-\(page)"
     }
 
     private func topicDetailURL(for url: URL, refresh: Bool) -> URL {
@@ -281,6 +391,14 @@ final class V2EXService {
             "city": ["beijing", "shanghai", "shenzhen", "hangzhou", "chengdu", "guangzhou", "hongkong", "wuhan"],
             "qna": ["qna", "share"]
         ]
+    }
+}
+
+private final class AnyCacheBox: NSObject {
+    let value: Any
+
+    init(_ value: Any) {
+        self.value = value
     }
 }
 

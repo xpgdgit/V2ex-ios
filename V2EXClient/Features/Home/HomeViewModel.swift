@@ -19,6 +19,10 @@ final class HomeViewModel: ObservableObject {
     }
 
     func load(refresh: Bool = false) async {
+        if !refresh, !topics.isEmpty, state == .loaded {
+            return
+        }
+
         loadRequestID += 1
         let requestID = loadRequestID
         let scope = activeScope
@@ -94,10 +98,8 @@ final class HomeViewModel: ObservableObject {
         selectedCategory = category
         selectedNode = nil
         currentPage = 1
-        topics = []
-        canLoadMore = false
+        applyCachedTopics(for: activeScope)
         loadMoreError = nil
-        state = .loading
         Task {
             await load()
         }
@@ -107,10 +109,8 @@ final class HomeViewModel: ObservableObject {
         guard selectedNode != node else { return }
         selectedNode = node
         currentPage = 1
-        topics = []
-        canLoadMore = false
+        applyCachedTopics(for: activeScope)
         loadMoreError = nil
-        state = .loading
         Task {
             await load()
         }
@@ -118,6 +118,26 @@ final class HomeViewModel: ObservableObject {
 
     private var activeScope: TopicListScope {
         TopicListScope(category: selectedCategory, node: selectedNode)
+    }
+
+    private func applyCachedTopics(for scope: TopicListScope) {
+        let cachedTopics: [Topic]?
+        if let node = scope.node {
+            cachedTopics = service.cachedNodeTopics(name: node.name)
+        } else {
+            cachedTopics = service.cachedCategoryTopics(tab: scope.category.tabName)
+        }
+
+        guard let cachedTopics, !cachedTopics.isEmpty else {
+            topics = []
+            canLoadMore = false
+            state = .loading
+            return
+        }
+
+        topics = cachedTopics
+        canLoadMore = true
+        state = .loaded
     }
 
     private func appendUnique(_ loaded: [Topic]) -> Int {

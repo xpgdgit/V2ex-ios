@@ -183,12 +183,28 @@ final class TopicDetailParserTests: XCTestCase {
         XCTAssertEqual(blocks[2].plainText, "第二段")
     }
 
+    func testDecodedHTMLHandlesEmptyString() {
+        XCTAssertEqual("".decodedHTML, "")
+    }
+
+    func testHTMLImageURLsExtractImagesWithoutTextParsing() {
+        let html = #"<p></p><img src="//cdn.v2ex.com/test.png"><img src='/static/avatar.png'>"#
+
+        XCTAssertEqual(
+            html.htmlImageURLs,
+            [
+                URL(string: "https://cdn.v2ex.com/test.png")!,
+                URL(string: "https://www.v2ex.com/static/avatar.png")!
+            ]
+        )
+    }
+
     func testRenderableBlocksKeepEmojiImagesSmall() {
         let html = #"<img src="//cdn.v2ex.com/emoji/smile.png" width="48" height="48">"#
 
         let blocks = html.renderableHTMLBlocks
 
-        XCTAssertEqual(blocks, [.text(html: #"<img class="v2ex-inline-emoji" src="https://cdn.v2ex.com/emoji/smile.png" alt="emoji">"#, style: .body)])
+        XCTAssertEqual(blocks, [.text(html: #"<img class="v2ex-inline-emoji" src="https://cdn.v2ex.com/emoji/smile.png" alt="emoji" data-v2ex-inline-size="24">"#, style: .body)])
     }
 
     func testRenderableBlocksHandleSingleQuotedImageSource() {
@@ -196,23 +212,105 @@ final class TopicDetailParserTests: XCTestCase {
 
         let blocks = html.renderableHTMLBlocks
 
-        XCTAssertEqual(blocks, [.text(html: #"<img class="v2ex-inline-emoji" src="https://cdn.v2ex.com/emoji/think.png" alt="emoji">"#, style: .body)])
+        XCTAssertEqual(blocks, [.text(html: #"<img class="v2ex-inline-emoji" src="https://cdn.v2ex.com/emoji/think.png" alt="emoji" data-v2ex-inline-size="24">"#, style: .body)])
     }
 
-    func testRenderableBlocksKeepEmbeddedImagesInHTMLSnippet() {
-        let html = #"我 15pro 换 17pro 要 3699 <img src="https://i.imgur.com/MAyk5GN.png" class="embedded_image" rel="noreferrer">"#
+    func testInlineHTMLRunsKeepImagesInTextFlow() {
+        let html = #"有没有人用 comose <img src="//cdn.v2ex.com/emoji/smile.png" width="48" height="48"> 好用吗"#
+
+        let runs = html.inlineHTMLRuns
+        let imageURLs = runs.compactMap { run -> URL? in
+            if case .image(let url, _) = run {
+                return url
+            }
+            return nil
+        }
+        let text = runs.compactMap { run -> String? in
+            if case .text(let value) = run {
+                return value
+            }
+            return nil
+        }.joined()
+
+        XCTAssertEqual(imageURLs, [URL(string: "https://cdn.v2ex.com/emoji/smile.png")!])
+        XCTAssertTrue(text.contains("有没有人用"))
+        XCTAssertTrue(text.contains("comose"))
+        XCTAssertTrue(text.contains("好用吗"))
+    }
+
+    func testInlineHTMLRunsAttachSmallImageAfterBreakToPreviousText() {
+        let html = #"有没有人用 comose<br><img src="//cdn.v2ex.com/emoji/smile.png" width="48" height="48">"#
+
+        let runs = html.inlineHTMLRuns
+        guard let imageIndex = runs.firstIndex(where: {
+            if case .image = $0 {
+                return true
+            }
+            return false
+        }) else {
+            return XCTFail("Expected an image run")
+        }
+
+        XCTAssertGreaterThan(imageIndex, 0)
+        if case .lineBreak = runs[imageIndex - 1] {
+            XCTFail("Inline image should not keep a forced line break before it")
+        }
+    }
+
+    func testRenderableBlocksAttachInlineImageParagraphToPreviousText() {
+        let html = #"<p>有没有人用 comose</p><p><img src="//cdn.v2ex.com/emoji/smile.png" width="48" height="48"></p>"#
 
         let blocks = html.renderableHTMLBlocks
 
         XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks[0].plainText, "有没有人用 comose")
 
-        guard case let .text(fragment, style) = blocks[0] else {
-            return XCTFail("Expected embedded image to remain inside a text fragment")
+        guard case .text(let html, _) = blocks[0] else {
+            return XCTFail("Expected a text block")
         }
 
-        XCTAssertEqual(style, .body)
-        XCTAssertTrue(fragment.contains("embedded_image"))
-        XCTAssertTrue(fragment.contains("https://i.imgur.com/MAyk5GN.png"))
+        let runs = html.inlineHTMLRuns
+        guard let imageIndex = runs.firstIndex(where: {
+            if case .image = $0 {
+                return true
+            }
+            return false
+        }) else {
+            return XCTFail("Expected an image run")
+        }
+
+        XCTAssertGreaterThan(imageIndex, 0)
+        if case .lineBreak = runs[imageIndex - 1] {
+            XCTFail("Inline image should stay in the previous paragraph flow")
+        }
+    }
+
+    func testRenderableBlocksKeepEmbeddedImagesInInlineFlow() {
+        let html = #"有没没人用 comose<a target="_blank" href="https://i.imgur.com/Iy0taMy.png" rel="nofollow noopener"><img src="https://i.imgur.com/Iy0taMy.png" class="embedded_image" rel="noreferrer"></a>"#
+
+        let blocks = html.renderableHTMLBlocks
+
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks[0].plainText, "有没没人用 comose")
+
+        guard case .text(let html, _) = blocks[0] else {
+            return XCTFail("Expected embedded image to stay with the text block")
+        }
+
+        let runs = html.inlineHTMLRuns
+        guard let imageIndex = runs.firstIndex(where: {
+            if case .image = $0 {
+                return true
+            }
+            return false
+        }) else {
+            return XCTFail("Expected an image run")
+        }
+
+        XCTAssertGreaterThan(imageIndex, 0)
+        if case .lineBreak = runs[imageIndex - 1] {
+            XCTFail("Embedded image should not force a line break when it fits inline")
+        }
     }
 
     func testRenderableBlocksSplitParagraphs() {

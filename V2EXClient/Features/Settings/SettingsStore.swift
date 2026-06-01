@@ -43,4 +43,20 @@ final class SettingsStore: ObservableObject {
         case .dark: .dark
         }
     }
+
+    var contentFontScale: CGFloat {
+        CGFloat(fontScale)
+    }
+
+    func scaledContentSize(_ baseSize: CGFloat) -> CGFloat {
+        baseSize * contentFontScale
+    }
+
+    func contentFont(
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default
+    ) -> Font {
+        .system(size: scaledContentSize(size), weight: weight, design: design)
+    }
 }

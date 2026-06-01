@@ -28,6 +28,13 @@ enum HTMLImageStyle: Equatable {
     case content
     case embedded
     case emoji(size: CGFloat)
+    case inline(size: CGFloat?)
+}
+
+enum HTMLInlineRun: Equatable {
+    case text(String)
+    case image(URL, size: CGFloat?)
+    case lineBreak
 }
 
 extension String {
@@ -43,6 +50,10 @@ extension String {
     }
 
     var decodedHTML: String {
+        guard !isEmpty else {
+            return self
+        }
+
         guard let data = data(using: .utf8),
               let attributed = try? NSAttributedString(
                 data: data,
@@ -55,6 +66,27 @@ extension String {
             return self
         }
         return attributed.string
+    }
+
+    var htmlImageURLs: [URL] {
+        let pattern = #"<img\b[^>]*\bsrc\s*=\s*(?:(['"])(.*?)\1|([^'">\s]+))[^>]*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+
+        let nsRange = NSRange(startIndex..<endIndex, in: self)
+        return regex.matches(in: self, range: nsRange).compactMap { match in
+            let rawSource: String
+            if let quotedRange = Range(match.range(at: 2), in: self) {
+                rawSource = String(self[quotedRange])
+            } else if let unquotedRange = Range(match.range(at: 3), in: self) {
+                rawSource = String(self[unquotedRange])
+            } else {
+                return nil
+            }
+
+            return normalizedHTMLImageURL(from: rawSource)
+        }
     }
 
     var strippedHTML: String {
@@ -147,11 +179,20 @@ extension String {
                 }
             case .embedded:
                 bufferedHTML += leadingHTML
-                bufferedHTML += normalizedEmbeddedHTMLTag(tagHTML, source: rawSource)
-            case .emoji:
+                appendTextBlock(from: bufferedHTML, into: &blocks)
+                bufferedHTML = ""
+                if let url = normalizedHTMLImageURL(from: rawSource) {
+                    blocks.append(.image(url, style: .embedded))
+                }
+            case .emoji(let size):
                 bufferedHTML += leadingHTML
                 if let url = normalizedHTMLImageURL(from: rawSource) {
-                    bufferedHTML += inlineEmojiHTMLTag(for: url)
+                    bufferedHTML += inlineEmojiHTMLTag(for: url, size: size)
+                }
+            case .inline(let size):
+                bufferedHTML += leadingHTML
+                if let url = normalizedHTMLImageURL(from: rawSource) {
+                    bufferedHTML += inlineImageHTMLTag(for: url, originalTagHTML: tagHTML, size: size)
                 }
             }
 
@@ -163,8 +204,165 @@ extension String {
         return blocks
     }
 
+    var inlineHTMLRuns: [HTMLInlineRun] {
+        let pattern = #"<img\b[^>]*\bsrc\s*=\s*(?:(['"])(.*?)\1|([^'">\s]+))[^>]*>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return inlineTextRuns(from: self)
+        }
+
+        let nsRange = NSRange(startIndex..<endIndex, in: self)
+        let matches = regex.matches(in: self, range: nsRange)
+        guard !matches.isEmpty else {
+            return inlineTextRuns(from: self)
+        }
+
+        var runs: [HTMLInlineRun] = []
+        var cursor = startIndex
+
+        for match in matches {
+            guard let wholeRange = Range(match.range(at: 0), in: self) else {
+                continue
+            }
+
+            runs.append(contentsOf: inlineTextRuns(from: String(self[cursor..<wholeRange.lowerBound])))
+
+            let rawSource: String
+            if let quotedRange = Range(match.range(at: 2), in: self) {
+                rawSource = String(self[quotedRange])
+            } else if let unquotedRange = Range(match.range(at: 3), in: self) {
+                rawSource = String(self[unquotedRange])
+            } else {
+                cursor = wholeRange.upperBound
+                continue
+            }
+            let tagHTML = String(self[wholeRange])
+            let style = htmlImageStyle(for: tagHTML, source: rawSource)
+
+            if let url = normalizedHTMLImageURL(from: rawSource) {
+                if style.isInlineFlowImage {
+                    attachNextImageToPreviousText(in: &runs)
+                }
+                runs.append(.image(url, size: style.inlineFlowSize))
+            }
+
+            cursor = wholeRange.upperBound
+        }
+
+        runs.append(contentsOf: inlineTextRuns(from: String(self[cursor..<endIndex])))
+        return runs
+    }
+
     private func appendTextBlock(from html: String, into blocks: inout [HTMLRenderableBlock]) {
         blocks.append(contentsOf: structuredTextBlocks(from: html))
+    }
+
+    private func inlineTextRuns(from html: String) -> [HTMLInlineRun] {
+        let text = html.readableInlineHTMLText
+        guard !text.isEmpty else {
+            return []
+        }
+
+        var runs: [HTMLInlineRun] = []
+        let lines = text.components(separatedBy: "\n")
+        for (lineIndex, line) in lines.enumerated() {
+            if lineIndex > 0 {
+                runs.append(.lineBreak)
+            }
+            runs.append(contentsOf: inlineTextTokens(from: line).map(HTMLInlineRun.text))
+        }
+        return runs
+    }
+
+    private func inlineTextTokens(from text: String) -> [String] {
+        var tokens: [String] = []
+        var word = ""
+
+        func flushWord() {
+            guard !word.isEmpty else { return }
+            if word.count > 24 {
+                tokens.append(contentsOf: word.map(String.init))
+            } else {
+                tokens.append(word)
+            }
+            word = ""
+        }
+
+        for character in text {
+            if character.isInlineWordCharacter {
+                word.append(character)
+            } else {
+                flushWord()
+                tokens.append(String(character))
+            }
+        }
+
+        flushWord()
+        return tokens
+    }
+
+    private func attachNextImageToPreviousText(in runs: inout [HTMLInlineRun]) {
+        var removedLineBreak = false
+        while case .lineBreak? = runs.last {
+            runs.removeLast()
+            removedLineBreak = true
+        }
+
+        guard removedLineBreak else { return }
+
+        switch runs.last {
+        case .text(let text) where text.last?.isWhitespace == false:
+            runs.append(.text(" "))
+        case .image:
+            runs.append(.text(" "))
+        default:
+            break
+        }
+    }
+
+    private var readableInlineHTMLText: String {
+        let blockAwareHTML = self
+            .replacingOccurrences(of: #"(?i)<br\s*/?>"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)</p\s*>"#, with: "\n\n", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)</div\s*>"#, with: "\n\n", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)</li\s*>"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)<li[^>]*>"#, with: "• ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)</h[1-6]\s*>"#, with: "\n\n", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)</pre\s*>"#, with: "\n\n", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)</blockquote\s*>"#, with: "\n\n", options: .regularExpression)
+
+        let withoutTags = blockAwareHTML
+            .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+            .decodedHTMLEntitiesPreservingInlineSpacing
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        let normalizedLines = withoutTags
+            .components(separatedBy: "\n")
+            .map { line in
+                line.replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
+            }
+
+        return normalizedLines
+            .joined(separator: "\n")
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+    }
+
+    private var decodedHTMLEntitiesPreservingInlineSpacing: String {
+        replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+            .map { line in
+                let leading = String(line.prefix { $0 == " " || $0 == "\t" })
+                let trailing = String(line.reversed().prefix { $0 == " " || $0 == "\t" }.reversed())
+                let middle = line.trimmingCharacters(in: .whitespaces)
+
+                guard !middle.isEmpty else {
+                    return line
+                }
+
+                return leading + middle.decodedHTML + trailing
+            }
+            .joined(separator: "\n")
     }
 
     private func normalizedHTMLImageURL(from rawValue: String) -> URL? {
@@ -187,8 +385,19 @@ extension String {
             .replacingOccurrences(of: #"(?i)</li\s*>"#, with: "$0\(separator)", options: .regularExpression)
             .replacingOccurrences(of: #"(?i)</h([1-6])\s*>"#, with: "$0\(separator)", options: .regularExpression)
 
-        return markedHTML
+        let mergedFragments = markedHTML
             .components(separatedBy: separator)
+            .reduce(into: [String]()) { fragments, fragment in
+                let trimmed = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.readableHTMLText.isEmpty || trimmed.contains("<img") else { return }
+                if trimmed.isInlineEmojiOnlyHTMLFragment, !fragments.isEmpty {
+                    fragments[fragments.count - 1] += " \(trimmed)"
+                } else {
+                    fragments.append(trimmed)
+                }
+            }
+
+        return mergedFragments
             .compactMap { fragment in
                 let trimmed = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.readableHTMLText.isEmpty || trimmed.contains("<img") else { return nil }
@@ -257,8 +466,12 @@ extension String {
         let loweredTag = tagHTML.lowercased()
         let loweredSource = source.lowercased()
 
-        if loweredTag.contains("embedded_image") {
-            return .embedded
+        if let inlineSize = numericHTMLAttribute("data-v2ex-inline-size", in: tagHTML) {
+            return .emoji(size: min(CGFloat(inlineSize), 28))
+        }
+
+        if loweredTag.contains("v2ex-inline-image") {
+            return .inline(size: numericHTMLAttribute("data-v2ex-inline-size", in: tagHTML).map { CGFloat($0) })
         }
 
         if loweredTag.contains("emoji")
@@ -270,47 +483,51 @@ extension String {
             return .emoji(size: 24)
         }
 
-        let width = firstRegexCapture(in: tagHTML, pattern: #"(?i)\bwidth="(\d+)""#).flatMap(Double.init)
-        let height = firstRegexCapture(in: tagHTML, pattern: #"(?i)\bheight="(\d+)""#).flatMap(Double.init)
+        let width = numericHTMLAttribute("width", in: tagHTML)
+        let height = numericHTMLAttribute("height", in: tagHTML)
         let candidate = max(width ?? 0, height ?? 0)
 
         if candidate > 0, candidate <= 128 {
             return .emoji(size: min(CGFloat(candidate), 28))
         }
 
+        if loweredTag.contains("embedded_image") {
+            return .inline(size: nil)
+        }
+
         return .content
     }
 
-    private func inlineEmojiHTMLTag(for url: URL) -> String {
-        #"<img class="v2ex-inline-emoji" src="\#(url.absoluteString)" alt="emoji">"#
+    private func numericHTMLAttribute(_ name: String, in tagHTML: String) -> Double? {
+        let escapedName = NSRegularExpression.escapedPattern(for: name)
+        let pattern = #"(?i)\b"# + escapedName + #"\s*=\s*(?:(['"])(\d+(?:\.\d+)?)\1|(\d+(?:\.\d+)?))"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return nil
+        }
+
+        let nsRange = NSRange(tagHTML.startIndex..<tagHTML.endIndex, in: tagHTML)
+        guard let match = regex.firstMatch(in: tagHTML, range: nsRange) else {
+            return nil
+        }
+
+        for index in [2, 3] where match.range(at: index).location != NSNotFound {
+            if let range = Range(match.range(at: index), in: tagHTML) {
+                return Double(tagHTML[range])
+            }
+        }
+
+        return nil
     }
 
-    private func normalizedEmbeddedHTMLTag(_ tagHTML: String, source: String) -> String {
-        guard let url = normalizedHTMLImageURL(from: source) else {
-            return tagHTML
+    private func inlineEmojiHTMLTag(for url: URL, size: CGFloat) -> String {
+        #"<img class="v2ex-inline-emoji" src="\#(url.absoluteString)" alt="emoji" data-v2ex-inline-size="\#(Int(size.rounded()))">"#
+    }
+
+    private func inlineImageHTMLTag(for url: URL, originalTagHTML _: String, size: CGFloat?) -> String {
+        if let size {
+            return #"<img class="v2ex-inline-image" src="\#(url.absoluteString)" alt="image" data-v2ex-inline-size="\#(Int(size.rounded()))">"#
         }
-
-        let replacedDoubleQuoted = tagHTML.replacingOccurrences(
-            of: #"(?i)\bsrc\s*=\s*"[^"]*""#,
-            with: #"src="\#(url.absoluteString)""#,
-            options: .regularExpression
-        )
-
-        if replacedDoubleQuoted != tagHTML {
-            return replacedDoubleQuoted
-        }
-
-        let replacedSingleQuoted = tagHTML.replacingOccurrences(
-            of: #"(?i)\bsrc\s*=\s*'[^']*'"#,
-            with: #"src="\#(url.absoluteString)""#,
-            options: .regularExpression
-        )
-
-        if replacedSingleQuoted != tagHTML {
-            return replacedSingleQuoted
-        }
-
-        return #"<img src="\#(url.absoluteString)" class="embedded_image">"#
+        return #"<img class="v2ex-inline-image" src="\#(url.absoluteString)" alt="image">"#
     }
 
     var attributedHTML: AttributedString {
@@ -368,6 +585,58 @@ extension String {
         }
 
         return swiftUIAttributed
+    }
+}
+
+private extension Character {
+    var isInlineWordCharacter: Bool {
+        let allowed = CharacterSet(charactersIn: "_-./:@#")
+        return unicodeScalars.allSatisfy {
+            CharacterSet.alphanumerics.contains($0) || allowed.contains($0)
+        }
+    }
+}
+
+private extension HTMLImageStyle {
+    var isInlineFlowImage: Bool {
+        switch self {
+        case .emoji, .inline:
+            return true
+        case .content, .embedded:
+            return false
+        }
+    }
+
+    var inlineFlowSize: CGFloat? {
+        switch self {
+        case .emoji(let size):
+            return size
+        case .inline(let size):
+            return size
+        case .content, .embedded:
+            return nil
+        }
+    }
+}
+
+private extension String {
+    var isInlineEmojiOnlyHTMLFragment: Bool {
+        guard range(of: #"(?i)<img\b(?=[^>]*\bv2ex-inline-(?:emoji|image)\b)[^>]*>"#, options: .regularExpression) != nil else {
+            return false
+        }
+
+        let withoutInlineEmoji = replacingOccurrences(
+            of: #"(?i)<img\b(?=[^>]*\bv2ex-inline-(?:emoji|image)\b)[^>]*>"#,
+            with: "",
+            options: .regularExpression
+        )
+        let withoutStructuralTags = withoutInlineEmoji.replacingOccurrences(
+            of: #"(?i)</?(?:p|div|span|br|a)[^>]*>"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        return withoutStructuralTags.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 

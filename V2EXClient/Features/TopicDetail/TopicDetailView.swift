@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WebKit
 
 struct TopicDetailView: View {
@@ -7,6 +8,7 @@ struct TopicDetailView: View {
     @StateObject private var viewModel: TopicDetailViewModel
     @State private var isShowingWebView = false
     @State private var contentRefreshID = UUID()
+    @State private var selectedImage: SelectedTopicImage?
     @EnvironmentObject private var settings: SettingsStore
     @Environment(\.openURL) private var openURL
 
@@ -59,6 +61,9 @@ struct TopicDetailView: View {
         .task {
             await viewModel.load()
         }
+        .fullScreenCover(item: $selectedImage) { image in
+            ImageViewer(imageURL: image.url)
+        }
     }
 
     private var isWebLayerVisible: Bool {
@@ -77,13 +82,14 @@ struct TopicDetailView: View {
                     topicCard(detail: detail)
 
                     Text("回复 \(detail.replies.count)")
-                        .font(.headline)
+                        .font(settings.contentFont(size: 17, weight: .semibold))
                         .padding(.top, 8)
 
                     if !detail.replies.isEmpty {
                         ReplyListCard(
                             replies: detail.replies,
-                            isOriginalPoster: isOriginalPoster
+                            isOriginalPoster: isOriginalPoster,
+                            onImageTap: openImageViewer
                         )
                     }
                 }
@@ -97,9 +103,9 @@ struct TopicDetailView: View {
         } else if case .failed(let message) = viewModel.state {
             VStack(spacing: 8) {
                 Text("内容暂不可用")
-                    .font(.subheadline.weight(.medium))
+                    .font(settings.contentFont(size: 15, weight: .medium))
                 Text(message)
-                    .font(.caption)
+                    .font(settings.contentFont(size: 12))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                 Button("重试解析") {
@@ -147,14 +153,14 @@ struct TopicDetailView: View {
             header(detail: detail)
 
             if !detail.contentHTML.isEmpty {
-                HTMLText(html: detail.contentHTML)
+                HTMLText(html: detail.contentHTML, onImageTap: openImageViewer)
             }
 
             if !detail.supplements.isEmpty {
                 Divider()
                     .padding(.top, 2)
 
-                SupplementList(supplements: detail.supplements)
+                SupplementList(supplements: detail.supplements, onImageTap: openImageViewer)
             }
         }
         .cardStyle()
@@ -163,7 +169,7 @@ struct TopicDetailView: View {
     private func header(detail: TopicDetail) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(topic.title.withCharacterBreakOpportunities)
-                .font(.title2.weight(.semibold))
+                .font(settings.contentFont(size: 22, weight: .semibold))
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -174,10 +180,10 @@ struct TopicDetailView: View {
                     HStack(spacing: 6) {
                         AvatarView(url: topic.member.avatarURL, size: 28)
                         Text(topic.member.username)
-                            .font(.subheadline.weight(.medium))
+                            .font(settings.contentFont(size: 15, weight: .medium))
                         if let metadata = topicMetadataText(for: detail) {
                             Text(metadata)
-                                .font(.subheadline)
+                                .font(settings.contentFont(size: 15))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
@@ -199,15 +205,20 @@ struct TopicDetailView: View {
     private func isOriginalPoster(_ reply: Reply) -> Bool {
         reply.member.username.caseInsensitiveCompare(topic.member.username) == .orderedSame
     }
+
+    private func openImageViewer(_ url: URL) {
+        selectedImage = SelectedTopicImage(url: url)
+    }
 }
 
 private struct SupplementList: View {
     let supplements: [TopicSupplement]
+    let onImageTap: (URL) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(supplements.enumerated()), id: \.element.id) { index, supplement in
-                SupplementRow(supplement: supplement)
+                SupplementRow(supplement: supplement, onImageTap: onImageTap)
                     .padding(.vertical, 14)
 
                 if index < supplements.count - 1 {
@@ -226,15 +237,18 @@ private struct SupplementList: View {
 }
 
 private struct SupplementRow: View {
+    @EnvironmentObject private var settings: SettingsStore
+
     let supplement: TopicSupplement
+    let onImageTap: (URL) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(supplement.title)
-                .font(.caption)
+                .font(settings.contentFont(size: 12))
                 .foregroundStyle(.secondary)
 
-            HTMLText(html: supplement.contentHTML)
+            HTMLText(html: supplement.contentHTML, onImageTap: onImageTap)
         }
     }
 }
@@ -242,11 +256,12 @@ private struct SupplementRow: View {
 private struct ReplyListCard: View {
     let replies: [Reply]
     let isOriginalPoster: (Reply) -> Bool
+    let onImageTap: (URL) -> Void
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(Array(replies.enumerated()), id: \.element.id) { index, reply in
-                ReplyRow(reply: reply, isOriginalPoster: isOriginalPoster(reply))
+                ReplyRow(reply: reply, isOriginalPoster: isOriginalPoster(reply), onImageTap: onImageTap)
                     .padding(.vertical, 14)
 
                 if index < replies.count - 1 {
@@ -266,18 +281,21 @@ private struct ReplyListCard: View {
 }
 
 private struct ReplyRow: View {
+    @EnvironmentObject private var settings: SettingsStore
+
     let reply: Reply
     let isOriginalPoster: Bool
+    let onImageTap: (URL) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 AvatarView(url: reply.member.avatarURL, size: 28)
                 Text(reply.member.username)
-                    .font(.subheadline.weight(.medium))
+                    .font(settings.contentFont(size: 15, weight: .medium))
                 if isOriginalPoster {
                     Text("OP")
-                        .font(.caption2.weight(.semibold))
+                        .font(settings.contentFont(size: 11, weight: .semibold))
                         .foregroundStyle(.blue)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
@@ -288,23 +306,24 @@ private struct ReplyRow: View {
                 }
                 if let createdText = reply.createdText ?? reply.createdAt?.relativeText {
                     Text(createdText)
-                        .font(.subheadline)
+                        .font(settings.contentFont(size: 15))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Spacer()
                 Text("#\(reply.floor)")
-                    .font(.caption)
+                    .font(settings.contentFont(size: 12))
                     .foregroundStyle(.secondary)
             }
 
-            HTMLText(html: reply.contentHTML)
+            HTMLText(html: reply.contentHTML, onImageTap: onImageTap)
         }
     }
 }
 
 private struct HTMLText: View {
     let html: String
+    let onImageTap: (URL) -> Void
 
     var body: some View {
         let blocks = HTMLRenderCache.blocks(for: html)
@@ -317,12 +336,12 @@ private struct HTMLText: View {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     switch block {
                     case .text(let html, let style):
-                        HTMLStyledText(html: html, style: style)
+                        HTMLStyledText(html: html, style: style, onImageTap: onImageTap)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     case .image(let url, let style):
-                        HTMLImageView(url: url, style: style)
+                        HTMLImageView(url: url, style: style, onTap: onImageTap)
                     }
                 }
             }
@@ -332,13 +351,16 @@ private struct HTMLText: View {
 }
 
 private struct HTMLStyledText: View {
+    @EnvironmentObject private var settings: SettingsStore
+
     let html: String
     let style: HTMLTextStyle
+    let onImageTap: (URL) -> Void
 
     var body: some View {
         Group {
             if html.contains("<img") {
-                InlineHTMLSnippetView(html: html, style: style)
+                InlineHTMLTextView(html: html, style: style, onImageTap: onImageTap)
             } else if style == .code {
                 Text(HTMLRenderCache.readableText(for: html))
                     .font(baseFont)
@@ -371,15 +393,15 @@ private struct HTMLStyledText: View {
     private var baseFont: Font {
         switch style {
         case .body, .listItem, .quote:
-            return .body
+            return settings.contentFont(size: 17)
         case .code:
-            return .system(.body, design: .monospaced)
+            return settings.contentFont(size: 15, design: .monospaced)
         case .heading(let level):
             switch level {
-            case 1: return .title2.weight(.bold)
-            case 2: return .title3.weight(.semibold)
-            case 3: return .headline
-            default: return .subheadline.weight(.semibold)
+            case 1: return settings.contentFont(size: 28, weight: .bold)
+            case 2: return settings.contentFont(size: 22, weight: .semibold)
+            case 3: return settings.contentFont(size: 19, weight: .semibold)
+            default: return settings.contentFont(size: 17, weight: .semibold)
             }
         }
     }
@@ -423,6 +445,12 @@ private enum HTMLRenderCache {
         return cache
     }()
 
+    private static let inlineRunCache = {
+        let cache = NSCache<NSString, HTMLCacheValue<[HTMLInlineRun]>>()
+        cache.countLimit = 300
+        return cache
+    }()
+
     static func blocks(for html: String) -> [HTMLRenderableBlock] {
         let key = html as NSString
         if let cached = blockCache.object(forKey: key) {
@@ -455,9 +483,274 @@ private enum HTMLRenderCache {
         readableCache.setObject(HTMLCacheValue(text), forKey: key)
         return text
     }
+
+    static func inlineRuns(for html: String) -> [HTMLInlineRun] {
+        let key = html as NSString
+        if let cached = inlineRunCache.object(forKey: key) {
+            return cached.value
+        }
+
+        let runs = html.inlineHTMLRuns
+        inlineRunCache.setObject(HTMLCacheValue(runs), forKey: key)
+        return runs
+    }
+}
+
+private struct InlineHTMLTextView: View {
+    @EnvironmentObject private var settings: SettingsStore
+
+    let html: String
+    let style: HTMLTextStyle
+    let onImageTap: (URL) -> Void
+
+    var body: some View {
+        InlineFlowLayout(horizontalSpacing: 0, verticalSpacing: lineSpacing) {
+            ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
+                switch run {
+                case .text(let text):
+                    Text(text)
+                        .font(baseFont)
+                        .foregroundStyle(textStyle)
+                        .lineLimit(1)
+                        .fixedSize()
+                case .image(let url, let size):
+                    InlineCachedImage(url: url, preferredSize: size, onTap: onImageTap)
+                case .lineBreak:
+                    Color.clear
+                        .frame(width: 0, height: lineHeight)
+                        .layoutValue(key: InlineLineBreakKey.self, value: true)
+                }
+            }
+        }
+        .padding(style == .code ? 10 : 0)
+        .padding(.leading, style == .quote ? 12 : 0)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(backgroundStyle)
+        .overlay(alignment: .leading) {
+            if style == .quote {
+                Rectangle()
+                    .fill(.quaternary)
+                    .frame(width: 3)
+                    .clipShape(Capsule())
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: style == .code ? 8 : 0))
+    }
+
+    private var runs: [HTMLInlineRun] {
+        HTMLRenderCache.inlineRuns(for: html)
+    }
+
+    private var baseFont: Font {
+        switch style {
+        case .body, .listItem, .quote:
+            return settings.contentFont(size: 17)
+        case .code:
+            return settings.contentFont(size: 15, design: .monospaced)
+        case .heading(let level):
+            switch level {
+            case 1: return settings.contentFont(size: 28, weight: .bold)
+            case 2: return settings.contentFont(size: 22, weight: .semibold)
+            case 3: return settings.contentFont(size: 19, weight: .semibold)
+            default: return settings.contentFont(size: 17, weight: .semibold)
+            }
+        }
+    }
+
+    private var lineHeight: CGFloat {
+        switch style {
+        case .code:
+            return settings.scaledContentSize(21)
+        case .heading(let level):
+            switch level {
+            case 1: return settings.scaledContentSize(36)
+            case 2: return settings.scaledContentSize(30)
+            case 3: return settings.scaledContentSize(26)
+            default: return settings.scaledContentSize(24)
+            }
+        default:
+            return settings.scaledContentSize(24)
+        }
+    }
+
+    private var lineSpacing: CGFloat {
+        style == .code ? 3 : 5
+    }
+
+    private var textStyle: HierarchicalShapeStyle {
+        style == .quote ? .secondary : .primary
+    }
+
+    @ViewBuilder
+    private var backgroundStyle: some View {
+        switch style {
+        case .code:
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.secondary.opacity(0.08))
+        default:
+            Color.clear
+        }
+    }
+}
+
+private struct InlineCachedImage: View {
+    let url: URL
+    let preferredSize: CGFloat?
+    let onTap: (URL) -> Void
+
+    var body: some View {
+        CachedRemoteImage(url: url) { image in
+            Button {
+                onTap(url)
+            } label: {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
+                    .scaledToFit()
+                    .frame(width: renderedSize(for: image).width, height: renderedSize(for: image).height)
+                    .clipShape(RoundedRectangle(cornerRadius: imageCornerRadius(for: image)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("查看图片")
+        } placeholder: {
+            ProgressView()
+                .controlSize(.mini)
+                .frame(width: 24, height: 24)
+        }
+    }
+
+    private func renderedSize(for image: UIImage) -> CGSize {
+        let naturalSize = image.size
+        guard naturalSize.width > 0, naturalSize.height > 0 else {
+            return CGSize(width: 24, height: 24)
+        }
+
+        if let preferredSize {
+            let scale = preferredSize / max(naturalSize.width, naturalSize.height)
+            return CGSize(width: naturalSize.width * scale, height: naturalSize.height * scale)
+        }
+
+        let maxWidth = max(120, UIScreen.main.bounds.width - 96)
+        let width = min(naturalSize.width, maxWidth)
+        let scale = width / naturalSize.width
+        return CGSize(width: width, height: naturalSize.height * scale)
+    }
+
+    private func imageCornerRadius(for image: UIImage) -> CGFloat {
+        let size = renderedSize(for: image)
+        return min(size.width, size.height) > 64 ? 8 : 0
+    }
+}
+
+private struct InlineLineBreakKey: LayoutValueKey {
+    static let defaultValue = false
+}
+
+private struct InlineFlowLayout: Layout {
+    let horizontalSpacing: CGFloat
+    let verticalSpacing: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Void
+    ) -> CGSize {
+        let maxWidth = proposal.width ?? UIScreen.main.bounds.width
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var lineHeight: CGFloat = 0
+
+        for subview in subviews {
+            if subview[InlineLineBreakKey.self] {
+                y += max(lineHeight, subview.sizeThatFits(.unspecified).height) + verticalSpacing
+                x = 0
+                lineHeight = 0
+                continue
+            }
+
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                y += lineHeight + verticalSpacing
+                x = 0
+                lineHeight = 0
+            }
+
+            x += size.width + horizontalSpacing
+            lineHeight = max(lineHeight, size.height)
+        }
+
+        return CGSize(width: maxWidth, height: y + lineHeight)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Void
+    ) {
+        let maxWidth = bounds.width
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var lineItems: [(index: Int, x: CGFloat, size: CGSize)] = []
+
+        func placeLine() {
+            for item in lineItems {
+                let subview = subviews[item.index]
+                subview.place(
+                    at: CGPoint(
+                        x: bounds.minX + item.x,
+                        y: bounds.minY + y + (lineHeight - item.size.height) / 2
+                    ),
+                    proposal: ProposedViewSize(item.size)
+                )
+            }
+            y += lineHeight + verticalSpacing
+            x = 0
+            lineHeight = 0
+            lineItems.removeAll(keepingCapacity: true)
+        }
+
+        for index in subviews.indices {
+            let subview = subviews[index]
+            if subview[InlineLineBreakKey.self] {
+                if lineItems.isEmpty {
+                    y += subview.sizeThatFits(.unspecified).height + verticalSpacing
+                } else {
+                    placeLine()
+                }
+                continue
+            }
+
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                placeLine()
+            }
+
+            lineItems.append((index, x, size))
+            x += size.width + horizontalSpacing
+            lineHeight = max(lineHeight, size.height)
+        }
+
+        if !lineItems.isEmpty {
+            for item in lineItems {
+                let subview = subviews[item.index]
+                subview.place(
+                    at: CGPoint(
+                        x: bounds.minX + item.x,
+                        y: bounds.minY + y + (lineHeight - item.size.height) / 2
+                    ),
+                    proposal: ProposedViewSize(item.size)
+                )
+            }
+        }
+    }
 }
 
 private struct InlineHTMLSnippetView: View {
+    @EnvironmentObject private var settings: SettingsStore
+
     let html: String
     let style: HTMLTextStyle
     @State private var measuredHeight: CGFloat = 24
@@ -550,6 +843,10 @@ private struct InlineHTMLSnippetView: View {
     }
 
     private var fontSize: Int {
+        Int(settings.scaledContentSize(baseFontSize).rounded())
+    }
+
+    private var baseFontSize: CGFloat {
         switch style {
         case .body, .listItem, .quote:
             return 17
@@ -656,64 +953,255 @@ private struct AutoSizingHTMLWebView: UIViewRepresentable {
 private struct HTMLImageView: View {
     let url: URL
     let style: HTMLImageStyle
+    let onTap: (URL) -> Void
 
     var body: some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-                switch style {
-                case .content:
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                case .embedded:
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: 220, maxHeight: 320, alignment: .leading)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                case .emoji(let size):
-                    image
-                        .resizable()
-                        .interpolation(.high)
-                        .antialiased(true)
-                        .scaledToFit()
-                        .frame(width: size, height: size)
-                }
-            case .failure:
-                VStack(spacing: 8) {
-                    Image(systemName: "photo")
-                        .font(.title2)
-                    Text(url.absoluteString)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                .frame(maxWidth: style == .content ? .infinity : 220, minHeight: style == .content ? 120 : 56)
-                .background {
-                    if style == .content {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(.secondary.opacity(0.08))
-                    }
-                }
+        imageContent
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var imageContent: some View {
+        if canOpenViewer {
+            Button {
+                onTap(url)
+            } label: {
+                renderedImage
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("查看图片")
+        } else {
+            renderedImage
+        }
+    }
+
+    private var renderedImage: some View {
+        CachedRemoteImage(url: url) { image in
+            loadedImage(image)
+        } placeholder: {
+            loadingPlaceholder
+        }
+    }
+
+    @ViewBuilder
+    private func loadedImage(_ image: UIImage) -> some View {
+        switch style {
+        case .content, .embedded:
+            NaturalSizeImage(image: image)
+        case .emoji(let size), .inline(let size?):
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .antialiased(true)
+                .scaledToFit()
+                .frame(width: size, height: size)
+        case .inline(nil):
+            NaturalSizeImage(image: image)
+        }
+    }
+
+    @ViewBuilder
+    private var loadingPlaceholder: some View {
+        if usesFullWidth {
+            ProgressView()
+                .frame(maxWidth: .infinity, minHeight: 120)
+                .background(.secondary.opacity(0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-            default:
-                Group {
-                    if case .content = style {
-                        ProgressView()
-                            .frame(maxWidth: .infinity, minHeight: 120)
-                            .background(.secondary.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    } else {
-                        ProgressView()
-                            .frame(width: style == .embedded ? 160 : 56, height: style == .embedded ? 180 : 56)
-                    }
+        } else {
+            ProgressView()
+                .frame(width: 56, height: 56)
+        }
+    }
+
+    private var usesFullWidth: Bool {
+        switch style {
+        case .content, .embedded:
+            return true
+        case .emoji, .inline:
+            return false
+        }
+    }
+
+    private var canOpenViewer: Bool {
+        switch style {
+        case .content, .embedded:
+            return true
+        case .emoji, .inline:
+            return false
+        }
+    }
+}
+
+private struct NaturalSizeImage: View {
+    let image: UIImage
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = renderedSize(maxWidth: proxy.size.width)
+
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .antialiased(true)
+                .scaledToFit()
+                .frame(width: size.width, height: size.height, alignment: .leading)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .frame(height: renderedSize(maxWidth: UIScreen.main.bounds.width - 64).height)
+    }
+
+    private func renderedSize(maxWidth: CGFloat) -> CGSize {
+        let naturalSize = image.size
+        guard naturalSize.width > 0, naturalSize.height > 0 else {
+            return CGSize(width: maxWidth, height: 120)
+        }
+
+        let width = min(naturalSize.width, maxWidth)
+        let scale = width / naturalSize.width
+        return CGSize(width: width, height: naturalSize.height * scale)
+    }
+}
+
+private struct SelectedTopicImage: Identifiable {
+    let url: URL
+
+    var id: String {
+        url.absoluteString
+    }
+}
+
+private struct ImageViewer: View {
+    let imageURL: URL
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var image: UIImage?
+    @State private var isLoading = true
+
+    var body: some View {
+        ZStack {
+            Color.black
+                .ignoresSafeArea()
+
+            if let image {
+                ZoomableImageView(image: image)
+                    .ignoresSafeArea()
+            } else if isLoading {
+                ProgressView()
+                    .tint(.white)
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 36))
+                    Text("图片暂不可用")
+                        .font(.headline)
                 }
+                .foregroundStyle(.white.opacity(0.8))
+            }
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 36, height: 36)
+                            .background(.black.opacity(0.45))
+                            .clipShape(Circle())
+                    }
+                    .accessibilityLabel("关闭图片")
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                Spacer()
             }
         }
-        .frame(maxWidth: style == .content ? .infinity : 220, alignment: .leading)
+        .task(id: imageURL) {
+            isLoading = true
+            image = await RemoteImageCache.shared.loadImage(for: imageURL)
+            isLoading = false
+        }
+    }
+}
+
+private struct ZoomableImageView: UIViewRepresentable {
+    let image: UIImage
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 5
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.backgroundColor = .black
+        scrollView.bouncesZoom = true
+
+        let imageView = UIImageView(image: image)
+        imageView.contentMode = .scaleAspectFit
+        imageView.isUserInteractionEnabled = true
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(imageView)
+        context.coordinator.imageView = imageView
+
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            imageView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            imageView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+            imageView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor)
+        ])
+
+        let doubleTap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleDoubleTap(_:))
+        )
+        doubleTap.numberOfTapsRequired = 2
+        scrollView.addGestureRecognizer(doubleTap)
+        context.coordinator.scrollView = scrollView
+
+        return scrollView
+    }
+
+    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        context.coordinator.imageView?.image = image
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        weak var scrollView: UIScrollView?
+        weak var imageView: UIImageView?
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            imageView
+        }
+
+        @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            guard let scrollView else { return }
+
+            if scrollView.zoomScale > scrollView.minimumZoomScale {
+                scrollView.setZoomScale(scrollView.minimumZoomScale, animated: true)
+            } else {
+                let location = recognizer.location(in: imageView)
+                let targetZoom = min(scrollView.maximumZoomScale, 2.5)
+                let width = scrollView.bounds.width / targetZoom
+                let height = scrollView.bounds.height / targetZoom
+                let rect = CGRect(
+                    x: location.x - width / 2,
+                    y: location.y - height / 2,
+                    width: width,
+                    height: height
+                )
+                scrollView.zoom(to: rect, animated: true)
+            }
+        }
     }
 }
 

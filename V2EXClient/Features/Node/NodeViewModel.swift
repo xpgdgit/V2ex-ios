@@ -19,10 +19,23 @@ final class NodeViewModel: ObservableObject {
         self.nodeName = nodeName
         self.service = service
         self.isFavorite = UserDefaults.standard.stringArray(forKey: favoritesKey)?.contains(nodeName) ?? false
+        applyCachedContent()
     }
 
     func load(refresh: Bool = false) async {
-        state = topics.isEmpty ? .loading : state
+        if !refresh {
+            if !topics.isEmpty, node != nil, state == .loaded {
+                return
+            }
+
+            if applyCachedContent() {
+                return
+            }
+        }
+
+        if topics.isEmpty {
+            state = .loading
+        }
         do {
             currentPage = 1
             loadMoreError = nil
@@ -66,6 +79,27 @@ final class NodeViewModel: ObservableObject {
         }
         UserDefaults.standard.set(Array(Set(favorites)).sorted(), forKey: favoritesKey)
         isFavorite.toggle()
+    }
+
+    @discardableResult
+    private func applyCachedContent() -> Bool {
+        var didApply = false
+
+        if let cachedNode = service.cachedNode(named: nodeName) {
+            node = cachedNode
+            didApply = true
+        }
+
+        if let cachedTopics = service.cachedNodeTopics(name: nodeName), !cachedTopics.isEmpty {
+            topics = cachedTopics
+            canLoadMore = true
+            state = .loaded
+            didApply = true
+        } else if didApply, topics.isEmpty {
+            state = .empty
+        }
+
+        return node != nil && !topics.isEmpty
     }
 
     private func appendUnique(_ loaded: [Topic]) -> Int {

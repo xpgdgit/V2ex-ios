@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct NodeView: View {
+    @EnvironmentObject private var settings: SettingsStore
+
     private let service: V2EXService
     @StateObject private var viewModel: NodeViewModel
 
@@ -27,12 +29,13 @@ struct NodeView: View {
 
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text(node.title)
-                                        .font(.title2.weight(.semibold))
+                                        .font(settings.contentFont(size: 22, weight: .semibold))
                                     Text(node.path)
+                                        .font(settings.contentFont(size: 17))
                                         .foregroundStyle(.secondary)
                                     if let topics = node.topics {
                                         Text("\(topics.formatted()) 个主题")
-                                            .font(.caption)
+                                            .font(settings.contentFont(size: 12))
                                             .foregroundStyle(.secondary)
                                     }
                                 }
@@ -46,6 +49,7 @@ struct NodeView: View {
                     Section("主题") {
                         if viewModel.topics.isEmpty {
                             Text("暂无可显示主题")
+                                .font(settings.contentFont(size: 17))
                                 .foregroundStyle(.secondary)
                         } else {
                             ForEach(viewModel.topics) { topic in
