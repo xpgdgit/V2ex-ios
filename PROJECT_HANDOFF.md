@@ -2,11 +2,7 @@
 
 ## Project Overview
 
-Project path:
 
-```text
-/Users/wadxm/Documents/Codex/2026-05-11/ios-app-v2ex
-```
 
 This is a native iOS client for V2EX.
 

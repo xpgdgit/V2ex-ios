@@ -55,34 +55,53 @@ final class V2EXService {
     }
 
     func topicDetail(for topic: Topic, refresh: Bool = false) async throws -> TopicDetail {
+        let startedAt = Date()
         let cacheKey = topicDetailCacheKey(for: topic)
         if !refresh, let cached = cachedTopicDetail(for: topic) {
+            #if DEBUG
+            logTopicDetailTiming("memory-cache topic=\(topic.id) elapsed=\(Self.elapsedMilliseconds(since: startedAt))ms replies=\(cached.replies.count)")
+            #endif
             return cached
         }
 
+        let diskCacheStartedAt = Date()
         if !refresh, let cached: TopicDetail = await cache.value(for: cacheKey) {
             let cachedReplyCount = max(cached.topic.replies, cached.replies.count)
             if cachedReplyCount >= topic.replies {
                 setMemory(cached, for: cacheKey)
+                #if DEBUG
+                logTopicDetailTiming("disk-cache topic=\(topic.id) elapsed=\(Self.elapsedMilliseconds(since: startedAt))ms diskLookup=\(Self.elapsedMilliseconds(since: diskCacheStartedAt))ms replies=\(cached.replies.count)")
+                #endif
                 return cached
             }
         }
 
         let requestURL = topicDetailURL(for: topic.webURL, refresh: refresh)
+        let networkStartedAt = Date()
         let html = try await client.string(
             from: requestURL,
             cachePolicy: cachePolicy(refresh: refresh)
         )
+        #if DEBUG
+        logTopicDetailTiming("html-loaded topic=\(topic.id) bytes=\(html.utf8.count) network=\(Self.elapsedMilliseconds(since: networkStartedAt))ms total=\(Self.elapsedMilliseconds(since: startedAt))ms")
+        #endif
         let detail = await topicDetail(for: topic, html: html, sourceURL: topic.webURL)
+        #if DEBUG
+        logTopicDetailTiming("finished topic=\(topic.id) total=\(Self.elapsedMilliseconds(since: startedAt))ms replies=\(detail.replies.count)")
+        #endif
         return detail
     }
 
     func topicDetail(for topic: Topic, html: String, sourceURL: URL? = nil) async -> TopicDetail {
+        let startedAt = Date()
         let cacheKey = topicDetailCacheKey(for: topic)
         let parser = parser
         let detail = await Task.detached(priority: .userInitiated) {
             parser.parse(html: html, topic: topic, sourceURL: sourceURL ?? topic.webURL)
         }.value
+        #if DEBUG
+        logTopicDetailTiming("parsed topic=\(topic.id) parse=\(Self.elapsedMilliseconds(since: startedAt))ms replies=\(detail.replies.count) supplements=\(detail.supplements.count)")
+        #endif
         setMemory(detail, for: cacheKey)
         await cache.set(detail, for: cacheKey)
         return detail
@@ -341,6 +360,16 @@ final class V2EXService {
         components.queryItems = queryItems
         return components.url ?? url
     }
+
+    #if DEBUG
+    private func logTopicDetailTiming(_ message: String) {
+        print("[V2EXPerf][TopicDetailService] \(message)")
+    }
+
+    private static func elapsedMilliseconds(since date: Date) -> Int {
+        Int(Date().timeIntervalSince(date) * 1000)
+    }
+    #endif
 
     private func webNodeTopics(name: String, page: Int, refresh: Bool) async throws -> [Topic] {
         var components = URLComponents(url: baseURL.appending(path: "/go/\(name)"), resolvingAgainstBaseURL: false)!

@@ -19,12 +19,20 @@ final class TopicDetailViewModel: ObservableObject {
     }
 
     func load(refresh: Bool = false) async {
+        let startedAt = Date()
+        #if DEBUG
+        logViewModelTiming("load-start topic=\(topic.id) refresh=\(refresh) hasDetail=\(detail != nil)")
+        #endif
+
         if !refresh {
             if detail != nil {
                 if let detail {
                     preloadImages(in: detail)
                 }
                 state = .loaded
+                #if DEBUG
+                logViewModelTiming("load-skip-existing topic=\(topic.id) elapsed=\(Self.elapsedMilliseconds(since: startedAt))ms")
+                #endif
                 return
             }
 
@@ -32,6 +40,9 @@ final class TopicDetailViewModel: ObservableObject {
                 detail = cachedDetail
                 state = .loaded
                 preloadImages(in: cachedDetail)
+                #if DEBUG
+                logViewModelTiming("load-memory-cache topic=\(topic.id) elapsed=\(Self.elapsedMilliseconds(since: startedAt))ms replies=\(cachedDetail.replies.count)")
+                #endif
                 return
             }
         }
@@ -46,9 +57,13 @@ final class TopicDetailViewModel: ObservableObject {
             guard generation == loadGeneration else {
                 return
             }
+            let publishStartedAt = Date()
             detail = loadedDetail
             state = .loaded
             preloadImages(in: loadedDetail)
+            #if DEBUG
+            logViewModelTiming("load-published topic=\(topic.id) serviceElapsed=\(Self.elapsedMilliseconds(since: startedAt))ms publishAndPreload=\(Self.elapsedMilliseconds(since: publishStartedAt))ms replies=\(loadedDetail.replies.count)")
+            #endif
         } catch {
             guard generation == loadGeneration else {
                 return
@@ -61,6 +76,9 @@ final class TopicDetailViewModel: ObservableObject {
             } else {
                 state = .loaded
             }
+            #if DEBUG
+            logViewModelTiming("load-failed topic=\(topic.id) elapsed=\(Self.elapsedMilliseconds(since: startedAt))ms error=\(error.localizedDescription)")
+            #endif
         }
     }
 
@@ -69,6 +87,7 @@ final class TopicDetailViewModel: ObservableObject {
             return
         }
 
+        let startedAt = Date()
         let loadedDetail = await service.topicDetail(
             for: topic,
             html: html,
@@ -77,9 +96,13 @@ final class TopicDetailViewModel: ObservableObject {
         detail = loadedDetail
         state = .loaded
         preloadImages(in: loadedDetail)
+        #if DEBUG
+        logViewModelTiming("web-html-published topic=\(topic.id) elapsed=\(Self.elapsedMilliseconds(since: startedAt))ms replies=\(loadedDetail.replies.count)")
+        #endif
     }
 
     private func preloadImages(in detail: TopicDetail) {
+        let startedAt = Date()
         let htmlFragments = [detail.contentHTML]
             + detail.supplements.map(\.contentHTML)
             + detail.replies.map(\.contentHTML)
@@ -87,11 +110,28 @@ final class TopicDetailViewModel: ObservableObject {
             .flatMap(\.htmlImageURLs)
 
         guard !urls.isEmpty else {
+            #if DEBUG
+            logViewModelTiming("preload-images none elapsed=\(Self.elapsedMilliseconds(since: startedAt))ms")
+            #endif
             return
         }
 
-        RemoteImageCache.shared.preload(Array(Set(urls)))
+        let uniqueURLs = Array(Set(urls))
+        RemoteImageCache.shared.preload(uniqueURLs)
+        #if DEBUG
+        logViewModelTiming("preload-images count=\(uniqueURLs.count) elapsed=\(Self.elapsedMilliseconds(since: startedAt))ms")
+        #endif
     }
+
+    #if DEBUG
+    private func logViewModelTiming(_ message: String) {
+        print("[V2EXPerf][TopicDetailViewModel] \(message)")
+    }
+
+    private static func elapsedMilliseconds(since date: Date) -> Int {
+        Int(Date().timeIntervalSince(date) * 1000)
+    }
+    #endif
 }
 
 private extension Error {

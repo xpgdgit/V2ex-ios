@@ -631,10 +631,17 @@ private struct InlineCachedImage: View {
             return CGSize(width: naturalSize.width * scale, height: naturalSize.height * scale)
         }
 
-        let maxWidth = max(120, UIScreen.main.bounds.width - 96)
-        let width = min(naturalSize.width, maxWidth)
+        if max(naturalSize.width, naturalSize.height) <= 128 {
+            return naturalSize
+        }
+
+        let width = maxContentImageWidth
         let scale = width / naturalSize.width
         return CGSize(width: width, height: naturalSize.height * scale)
+    }
+
+    private var maxContentImageWidth: CGFloat {
+        max(120, UIScreen.main.bounds.width - 60)
     }
 
     private func imageCornerRadius(for image: UIImage) -> CGFloat {
@@ -1036,29 +1043,20 @@ private struct NaturalSizeImage: View {
     let image: UIImage
 
     var body: some View {
-        GeometryReader { proxy in
-            let size = renderedSize(maxWidth: proxy.size.width)
-
-            Image(uiImage: image)
-                .resizable()
-                .interpolation(.high)
-                .antialiased(true)
-                .scaledToFit()
-                .frame(width: size.width, height: size.height, alignment: .leading)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-        .frame(height: renderedSize(maxWidth: UIScreen.main.bounds.width - 64).height)
+        Image(uiImage: image)
+            .resizable()
+            .interpolation(.high)
+            .antialiased(true)
+            .aspectRatio(aspectRatio, contentMode: .fit)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func renderedSize(maxWidth: CGFloat) -> CGSize {
-        let naturalSize = image.size
-        guard naturalSize.width > 0, naturalSize.height > 0 else {
-            return CGSize(width: maxWidth, height: 120)
+    private var aspectRatio: CGFloat {
+        guard image.size.width > 0, image.size.height > 0 else {
+            return 1
         }
-
-        let width = min(naturalSize.width, maxWidth)
-        let scale = width / naturalSize.width
-        return CGSize(width: width, height: naturalSize.height * scale)
+        return image.size.width / image.size.height
     }
 }
 
