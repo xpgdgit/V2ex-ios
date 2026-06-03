@@ -1,6 +1,6 @@
 import SwiftUI
 import UIKit
-import WebKit
+import Photos
 
 struct TopicDetailView: View {
     let topic: Topic
@@ -62,7 +62,7 @@ struct TopicDetailView: View {
             await viewModel.load()
         }
         .fullScreenCover(item: $selectedImage) { image in
-            ImageViewer(imageURL: image.url)
+            ImageViewer(imageURLs: image.urls, initialIndex: image.index)
         }
     }
 
@@ -207,7 +207,25 @@ struct TopicDetailView: View {
     }
 
     private func openImageViewer(_ url: URL) {
-        selectedImage = SelectedTopicImage(url: url)
+        let urls = topicImageURLs()
+        guard !urls.isEmpty else {
+            selectedImage = SelectedTopicImage(urls: [url], index: 0)
+            return
+        }
+
+        let index = urls.firstIndex(of: url) ?? 0
+        selectedImage = SelectedTopicImage(urls: urls, index: index)
+    }
+
+    private func topicImageURLs() -> [URL] {
+        guard let detail = viewModel.detail else {
+            return []
+        }
+
+        let htmlFragments = [detail.contentHTML]
+            + detail.supplements.map(\.contentHTML)
+            + detail.replies.map(\.contentHTML)
+        return htmlFragments.flatMap(\.htmlImageURLs)
     }
 }
 
@@ -336,8 +354,7 @@ private struct HTMLText: View {
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     switch block {
                     case .text(let html, let style):
-                        HTMLStyledText(html: html, style: style, onImageTap: onImageTap)
-                            .textSelection(.enabled)
+                        HTMLStyledText(html: html, style: style)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     case .image(let url, let style):
@@ -352,58 +369,40 @@ private struct HTMLText: View {
 
 private struct HTMLStyledText: View {
     @EnvironmentObject private var settings: SettingsStore
+    @Environment(\.openURL) private var openURL
 
     let html: String
     let style: HTMLTextStyle
-    let onImageTap: (URL) -> Void
 
     var body: some View {
-        Group {
-            if html.contains("<img") {
-                InlineHTMLTextView(html: html, style: style, onImageTap: onImageTap)
-            } else if style == .code {
-                Text(HTMLRenderCache.readableText(for: html))
-                    .font(baseFont)
-                    .lineSpacing(2)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(backgroundStyle)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
-                Text(HTMLRenderCache.attributedText(for: html))
-                    .font(baseFont)
-                    .lineSpacing(style == .code ? 2 : 4)
-                    .padding(style == .code ? 10 : 0)
-                    .padding(.leading, style == .quote ? 12 : 0)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(backgroundStyle)
-                    .overlay(alignment: .leading) {
-                        if style == .quote {
-                            Rectangle()
-                                .fill(.quaternary)
-                                .frame(width: 3)
-                                .clipShape(Capsule())
-                        }
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: style == .code ? 8 : 0))
+        SelectableHTMLTextView(
+            attributedText: HTMLRenderCache.selectableAttributedText(
+                for: html,
+                style: style,
+                settings: settings
+            ),
+            contentKey: HTMLRenderCache.selectableContentKey(
+                for: html,
+                style: style,
+                settings: settings
+            ),
+            onOpenURL: { url in
+                openURL(url)
+            }
+        )
+        .padding(style == .code ? 10 : 0)
+        .padding(.leading, style == .quote ? 12 : 0)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(backgroundStyle)
+        .overlay(alignment: .leading) {
+            if style == .quote {
+                Rectangle()
+                    .fill(.quaternary)
+                    .frame(width: 3)
+                    .clipShape(Capsule())
             }
         }
-    }
-
-    private var baseFont: Font {
-        switch style {
-        case .body, .listItem, .quote:
-            return settings.contentFont(size: 17)
-        case .code:
-            return settings.contentFont(size: 15, design: .monospaced)
-        case .heading(let level):
-            switch level {
-            case 1: return settings.contentFont(size: 28, weight: .bold)
-            case 2: return settings.contentFont(size: 22, weight: .semibold)
-            case 3: return settings.contentFont(size: 19, weight: .semibold)
-            default: return settings.contentFont(size: 17, weight: .semibold)
-            }
-        }
+        .clipShape(RoundedRectangle(cornerRadius: style == .code ? 8 : 0))
     }
 
     @ViewBuilder
@@ -415,6 +414,483 @@ private struct HTMLStyledText: View {
         default:
             Color.clear
         }
+    }
+}
+
+private struct SelectableHTMLTextView: UIViewRepresentable {
+    let attributedText: NSAttributedString
+    let contentKey: String
+    let onOpenURL: (URL) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onOpenURL: onOpenURL)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.delegate = context.coordinator
+        textView.backgroundColor = .clear
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = false
+        textView.showsVerticalScrollIndicator = false
+        textView.showsHorizontalScrollIndicator = false
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.adjustsFontForContentSizeCategory = false
+        textView.dataDetectorTypes = []
+        textView.linkTextAttributes = [
+            .foregroundColor: UIColor.systemBlue
+        ]
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        context.coordinator.onOpenURL = onOpenURL
+        if context.coordinator.contentKey != contentKey {
+            textView.attributedText = attributedText
+            context.coordinator.contentKey = contentKey
+            context.coordinator.resetInlineImageLoading()
+        }
+        context.coordinator.loadInlineImages(in: textView)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: UITextView,
+        context _: Context
+    ) -> CGSize? {
+        let width = max(1, proposal.width ?? UIScreen.main.bounds.width)
+        let fittingSize = CGSize(width: width, height: .greatestFiniteMagnitude)
+        let height = uiView.sizeThatFits(fittingSize).height
+        return CGSize(width: width, height: ceil(height))
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var onOpenURL: (URL) -> Void
+        var contentKey: String?
+        private var loadingAttachmentIDs = Set<String>()
+
+        init(onOpenURL: @escaping (URL) -> Void) {
+            self.onOpenURL = onOpenURL
+        }
+
+        func resetInlineImageLoading() {
+            loadingAttachmentIDs.removeAll()
+        }
+
+        func loadInlineImages(in textView: UITextView) {
+            let attachments = inlineImageAttachments(in: textView.attributedText)
+            for attachment in attachments where attachment.image == nil {
+                if let cachedImage = RemoteImageCache.shared.image(for: attachment.url) {
+                    apply(cachedImage, to: attachment, in: textView)
+                    continue
+                }
+
+                guard loadingAttachmentIDs.insert(attachment.identifier).inserted else {
+                    continue
+                }
+
+                Task { @MainActor [weak self, weak textView, weak attachment] in
+                    guard let self, let textView, let attachment else { return }
+                    let image = await RemoteImageCache.shared.loadImage(for: attachment.url)
+                    loadingAttachmentIDs.remove(attachment.identifier)
+                    guard let image else { return }
+                    apply(image, to: attachment, in: textView)
+                }
+            }
+        }
+
+        private func inlineImageAttachments(in attributedText: NSAttributedString) -> [InlineHTMLImageAttachment] {
+            var attachments: [InlineHTMLImageAttachment] = []
+            let range = NSRange(location: 0, length: attributedText.length)
+            attributedText.enumerateAttribute(.attachment, in: range) { value, _, _ in
+                guard let attachment = value as? InlineHTMLImageAttachment else {
+                    return
+                }
+                attachments.append(attachment)
+            }
+            return attachments
+        }
+
+        private func apply(
+            _ image: UIImage,
+            to attachment: InlineHTMLImageAttachment,
+            in textView: UITextView
+        ) {
+            attachment.image = image
+            let selectedRange = textView.selectedRange
+            textView.attributedText = NSMutableAttributedString(attributedString: textView.attributedText)
+            if selectedRange.location + selectedRange.length <= textView.attributedText.length {
+                textView.selectedRange = selectedRange
+            }
+            textView.invalidateIntrinsicContentSize()
+            textView.setNeedsLayout()
+        }
+
+        func textView(
+            _: UITextView,
+            primaryActionFor textItem: UITextItem,
+            defaultAction: UIAction
+        ) -> UIAction? {
+            guard let link = textItem.value(forKey: "link") as? URL else {
+                return defaultAction
+            }
+
+            return UIAction { [weak self] _ in
+                self?.onOpenURL(link)
+            }
+        }
+    }
+}
+
+private final class InlineHTMLImageAttachment: NSTextAttachment {
+    let identifier: String
+    let url: URL
+
+    init(identifier: String, url: URL, displaySize: CGFloat, image: UIImage?) {
+        self.identifier = identifier
+        self.url = url
+        super.init(data: nil, ofType: nil)
+        self.image = image
+        bounds = CGRect(x: 0, y: -displaySize * 0.18, width: displaySize, height: displaySize)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+@MainActor
+private enum SelectableHTMLAttributedStringBuilder {
+    static func attributedText(
+        for html: String,
+        style: HTMLTextStyle,
+        settings: SettingsStore
+    ) -> NSAttributedString {
+        let preparedHTML = preparedSelectableHTML(from: html.selectableHTMLFragment)
+        let wrappedHTML = wrappedHTML(for: preparedHTML.html, style: style, settings: settings)
+        guard let data = wrappedHTML.data(using: .utf8),
+              let attributed = try? NSMutableAttributedString(
+                data: data,
+                options: [
+                    .documentType: NSAttributedString.DocumentType.html,
+                    .characterEncoding: String.Encoding.utf8.rawValue
+                ],
+                documentAttributes: nil
+              ) else {
+            return fallbackText(for: preparedHTML, style: style, settings: settings)
+        }
+
+        if attributed.string.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+            return NSAttributedString(string: " ")
+        }
+
+        applyAppStyle(to: attributed, style: style, settings: settings)
+        replaceInlineImageMarkers(in: attributed, with: preparedHTML.inlineImages)
+        return attributed
+    }
+
+    private static func fallbackText(
+        for preparedHTML: PreparedSelectableHTML,
+        style: HTMLTextStyle,
+        settings: SettingsStore
+    ) -> NSAttributedString {
+        let text = preparedHTML.html.readableHTMLText.isEmpty ? " " : preparedHTML.html.readableHTMLText
+        let attributed = NSMutableAttributedString(string: text)
+        applyAppStyle(to: attributed, style: style, settings: settings)
+        replaceInlineImageMarkers(in: attributed, with: preparedHTML.inlineImages)
+        return attributed
+    }
+
+    private struct PreparedSelectableHTML {
+        let html: String
+        let inlineImages: [InlineHTMLImage]
+    }
+
+    private struct InlineHTMLImage {
+        let marker: String
+        let identifier: String
+        let url: URL
+        let displaySize: CGFloat
+    }
+
+    private static func preparedSelectableHTML(from html: String) -> PreparedSelectableHTML {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<img\b[^>]*\bsrc\s*=\s*(?:(['"])(.*?)\1|([^'">\s]+))[^>]*>"#,
+            options: [.caseInsensitive]
+        ) else {
+            return PreparedSelectableHTML(html: html, inlineImages: [])
+        }
+
+        var result = ""
+        var inlineImages: [InlineHTMLImage] = []
+        var cursor = html.startIndex
+        let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
+
+        for match in regex.matches(in: html, range: nsRange) {
+            guard let range = Range(match.range, in: html) else { continue }
+            result += String(html[cursor..<range.lowerBound])
+
+            let tagHTML = String(html[range])
+            if isInlineImageTag(tagHTML),
+               let rawSource = imageSource(from: match, in: html),
+               let url = normalizedImageURL(from: rawSource) {
+                result = result.removingTrailingBreakBeforeInlineImage
+                let marker = "V2EX_INLINE_IMAGE_MARKER_\(inlineImages.count)_\(UUID().uuidString)"
+                let identifier = "\(url.absoluteString)-\(inlineImages.count)-\(UUID().uuidString)"
+                inlineImages.append(
+                    InlineHTMLImage(
+                        marker: marker,
+                        identifier: identifier,
+                        url: url,
+                        displaySize: inlineImageDisplaySize(from: tagHTML)
+                    )
+                )
+                result += marker
+            } else {
+                result += " "
+            }
+
+            cursor = range.upperBound
+        }
+
+        result += String(html[cursor...])
+        return PreparedSelectableHTML(html: result, inlineImages: inlineImages)
+    }
+
+    private static func replaceInlineImageMarkers(
+        in attributed: NSMutableAttributedString,
+        with inlineImages: [InlineHTMLImage]
+    ) {
+        guard attributed.length > 0 else { return }
+
+        for inlineImage in inlineImages {
+            let markerRange = (attributed.string as NSString).range(of: inlineImage.marker)
+            guard markerRange.location != NSNotFound else { continue }
+
+            var attributes: [NSAttributedString.Key: Any] = [:]
+            if markerRange.location < attributed.length {
+                attributes = attributed.attributes(at: markerRange.location, effectiveRange: nil)
+            }
+            let attachment = InlineHTMLImageAttachment(
+                identifier: inlineImage.identifier,
+                url: inlineImage.url,
+                displaySize: inlineImage.displaySize,
+                image: RemoteImageCache.shared.image(for: inlineImage.url)
+            )
+            let attachmentString = NSMutableAttributedString(attachment: attachment)
+            for (key, value) in attributes where key != .attachment {
+                attachmentString.addAttribute(
+                    key,
+                    value: value,
+                    range: NSRange(location: 0, length: attachmentString.length)
+                )
+            }
+            attributed.replaceCharacters(in: markerRange, with: attachmentString)
+        }
+    }
+
+    private static func isInlineImageTag(_ tagHTML: String) -> Bool {
+        let loweredTag = tagHTML.lowercased()
+        return loweredTag.contains("v2ex-inline-emoji")
+            || loweredTag.contains("v2ex-inline-image")
+            || loweredTag.contains("data-v2ex-inline-size")
+    }
+
+    private static func imageSource(from match: NSTextCheckingResult, in html: String) -> String? {
+        for index in [2, 3] where match.range(at: index).location != NSNotFound {
+            if let range = Range(match.range(at: index), in: html) {
+                return String(html[range])
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedImageURL(from rawValue: String) -> URL? {
+        if rawValue.hasPrefix("//") {
+            return URL(string: "https:\(rawValue)")
+        }
+        if rawValue.hasPrefix("/") {
+            return URL(string: "https://www.v2ex.com\(rawValue)")
+        }
+        return URL(string: rawValue)
+    }
+
+    private static func inlineImageDisplaySize(from tagHTML: String) -> CGFloat {
+        let size = numericHTMLAttribute("data-v2ex-inline-size", in: tagHTML)
+            ?? numericHTMLAttribute("width", in: tagHTML)
+            ?? numericHTMLAttribute("height", in: tagHTML)
+            ?? 24
+        return min(max(CGFloat(size), 1), 28)
+    }
+
+    private static func numericHTMLAttribute(_ name: String, in tagHTML: String) -> Double? {
+        let escapedName = NSRegularExpression.escapedPattern(for: name)
+        let pattern = #"(?i)\b"# + escapedName + #"\s*=\s*(?:(['"])(\d+(?:\.\d+)?)\1|(\d+(?:\.\d+)?))"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return nil
+        }
+
+        let nsRange = NSRange(tagHTML.startIndex..<tagHTML.endIndex, in: tagHTML)
+        guard let match = regex.firstMatch(in: tagHTML, range: nsRange) else {
+            return nil
+        }
+
+        for index in [2, 3] where match.range(at: index).location != NSNotFound {
+            if let range = Range(match.range(at: index), in: tagHTML) {
+                return Double(tagHTML[range])
+            }
+        }
+
+        return nil
+    }
+
+    private static func wrappedHTML(
+        for body: String,
+        style: HTMLTextStyle,
+        settings: SettingsStore
+    ) -> String {
+        """
+        <html>
+        <head>
+        <meta name="viewport" content="initial-scale=1.0" />
+        <base href="https://www.v2ex.com" />
+        <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+            font-size: \(baseFontSize(for: style, settings: settings))px;
+            line-height: \(style == .code ? "1.4" : "1.55");
+            margin: 0;
+            padding: 0;
+        }
+        p, div, ul, ol, li, blockquote, pre, h1, h2, h3, h4, h5, h6 {
+            margin: 0;
+            padding: 0;
+        }
+        ul, ol {
+            padding-left: 1.2em;
+        }
+        pre {
+            white-space: pre-wrap;
+        }
+        a {
+            color: #0a84ff;
+            text-decoration: none;
+        }
+        </style>
+        </head>
+        <body>\(body)</body>
+        </html>
+        """
+    }
+
+    private static func applyAppStyle(
+        to attributed: NSMutableAttributedString,
+        style: HTMLTextStyle,
+        settings: SettingsStore
+    ) {
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        guard fullRange.length > 0 else { return }
+
+        attributed.enumerateAttribute(.font, in: fullRange) { value, range, _ in
+            let existingFont = value as? UIFont
+            attributed.addAttribute(
+                .font,
+                value: font(for: style, settings: settings, existingFont: existingFont),
+                range: range
+            )
+        }
+
+        attributed.enumerateAttribute(.paragraphStyle, in: fullRange) { value, range, _ in
+            let paragraphStyle = (value as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle
+                ?? NSMutableParagraphStyle()
+            paragraphStyle.lineSpacing = style == .code ? 2 : 4
+            paragraphStyle.lineBreakMode = .byWordWrapping
+            attributed.addAttribute(.paragraphStyle, value: paragraphStyle, range: range)
+        }
+        attributed.addAttribute(.foregroundColor, value: textColor(for: style), range: fullRange)
+
+        attributed.enumerateAttribute(.link, in: fullRange) { value, range, _ in
+            guard value != nil else { return }
+            attributed.addAttribute(.foregroundColor, value: UIColor.systemBlue, range: range)
+        }
+    }
+
+    private static func font(
+        for style: HTMLTextStyle,
+        settings: SettingsStore,
+        existingFont: UIFont?
+    ) -> UIFont {
+        let traits = existingFont?.fontDescriptor.symbolicTraits ?? []
+        let weight: UIFont.Weight
+        if case .heading = style {
+            weight = .semibold
+        } else if traits.contains(.traitBold) {
+            weight = .semibold
+        } else {
+            weight = .regular
+        }
+
+        let size = baseFontSize(for: style, settings: settings)
+        let font: UIFont
+        if style == .code {
+            font = .monospacedSystemFont(ofSize: size, weight: weight)
+        } else {
+            font = .systemFont(ofSize: size, weight: weight)
+        }
+
+        guard traits.contains(.traitItalic),
+              let descriptor = font.fontDescriptor.withSymbolicTraits(
+                font.fontDescriptor.symbolicTraits.union(.traitItalic)
+              ) else {
+            return font
+        }
+        return UIFont(descriptor: descriptor, size: size)
+    }
+
+    private static func baseFontSize(for style: HTMLTextStyle, settings: SettingsStore) -> CGFloat {
+        switch style {
+        case .body, .listItem, .quote:
+            return settings.scaledContentSize(17)
+        case .code:
+            return settings.scaledContentSize(15)
+        case .heading(let level):
+            switch level {
+            case 1: return settings.scaledContentSize(28)
+            case 2: return settings.scaledContentSize(22)
+            case 3: return settings.scaledContentSize(19)
+            default: return settings.scaledContentSize(17)
+            }
+        }
+    }
+
+    private static func textColor(for style: HTMLTextStyle) -> UIColor {
+        style == .quote ? .secondaryLabel : .label
+    }
+}
+
+private extension String {
+    var removingTrailingBreakBeforeInlineImage: String {
+        var result = replacingOccurrences(
+            of: #"(?is)(?:\s*<br\s*/?>\s*)+((?:<a\b[^>]*>\s*)*)$"#,
+            with: " $1",
+            options: .regularExpression
+        )
+        result = result.replacingOccurrences(
+            of: #"(?is)</p\s*>\s*<p[^>]*>\s*((?:<a\b[^>]*>\s*)*)$"#,
+            with: " $1",
+            options: .regularExpression
+        )
+        result = result.replacingOccurrences(
+            of: #"(?is)</div\s*>\s*<div[^>]*>\s*((?:<a\b[^>]*>\s*)*)$"#,
+            with: " $1",
+            options: .regularExpression
+        )
+        return result
     }
 }
 
@@ -433,24 +909,6 @@ private enum HTMLRenderCache {
         return cache
     }()
 
-    private static let attributedCache = {
-        let cache = NSCache<NSString, HTMLCacheValue<AttributedString>>()
-        cache.countLimit = 300
-        return cache
-    }()
-
-    private static let readableCache = {
-        let cache = NSCache<NSString, HTMLCacheValue<String>>()
-        cache.countLimit = 300
-        return cache
-    }()
-
-    private static let inlineRunCache = {
-        let cache = NSCache<NSString, HTMLCacheValue<[HTMLInlineRun]>>()
-        cache.countLimit = 300
-        return cache
-    }()
-
     static func blocks(for html: String) -> [HTMLRenderableBlock] {
         let key = html as NSString
         if let cached = blockCache.object(forKey: key) {
@@ -462,498 +920,26 @@ private enum HTMLRenderCache {
         return blocks
     }
 
-    static func attributedText(for html: String) -> AttributedString {
-        let key = html as NSString
-        if let cached = attributedCache.object(forKey: key) {
-            return cached.value
-        }
-
-        let attributed = html.attributedHTML
-        attributedCache.setObject(HTMLCacheValue(attributed), forKey: key)
-        return attributed
-    }
-
-    static func readableText(for html: String) -> String {
-        let key = html as NSString
-        if let cached = readableCache.object(forKey: key) {
-            return cached.value
-        }
-
-        let text = html.readableHTMLText
-        readableCache.setObject(HTMLCacheValue(text), forKey: key)
-        return text
-    }
-
-    static func inlineRuns(for html: String) -> [HTMLInlineRun] {
-        let key = html as NSString
-        if let cached = inlineRunCache.object(forKey: key) {
-            return cached.value
-        }
-
-        let runs = html.inlineHTMLRuns
-        inlineRunCache.setObject(HTMLCacheValue(runs), forKey: key)
-        return runs
-    }
-}
-
-private struct InlineHTMLTextView: View {
-    @EnvironmentObject private var settings: SettingsStore
-
-    let html: String
-    let style: HTMLTextStyle
-    let onImageTap: (URL) -> Void
-
-    var body: some View {
-        InlineFlowLayout(horizontalSpacing: 0, verticalSpacing: lineSpacing) {
-            ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
-                switch run {
-                case .text(let text):
-                    Text(text)
-                        .font(baseFont)
-                        .foregroundStyle(textStyle)
-                        .lineLimit(1)
-                        .fixedSize()
-                case .image(let url, let size):
-                    InlineCachedImage(url: url, preferredSize: size, onTap: onImageTap)
-                case .lineBreak:
-                    Color.clear
-                        .frame(width: 0, height: lineHeight)
-                        .layoutValue(key: InlineLineBreakKey.self, value: true)
-                }
-            }
-        }
-        .padding(style == .code ? 10 : 0)
-        .padding(.leading, style == .quote ? 12 : 0)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(backgroundStyle)
-        .overlay(alignment: .leading) {
-            if style == .quote {
-                Rectangle()
-                    .fill(.quaternary)
-                    .frame(width: 3)
-                    .clipShape(Capsule())
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: style == .code ? 8 : 0))
-    }
-
-    private var runs: [HTMLInlineRun] {
-        HTMLRenderCache.inlineRuns(for: html)
-    }
-
-    private var baseFont: Font {
-        switch style {
-        case .body, .listItem, .quote:
-            return settings.contentFont(size: 17)
-        case .code:
-            return settings.contentFont(size: 15, design: .monospaced)
-        case .heading(let level):
-            switch level {
-            case 1: return settings.contentFont(size: 28, weight: .bold)
-            case 2: return settings.contentFont(size: 22, weight: .semibold)
-            case 3: return settings.contentFont(size: 19, weight: .semibold)
-            default: return settings.contentFont(size: 17, weight: .semibold)
-            }
-        }
-    }
-
-    private var lineHeight: CGFloat {
-        switch style {
-        case .code:
-            return settings.scaledContentSize(21)
-        case .heading(let level):
-            switch level {
-            case 1: return settings.scaledContentSize(36)
-            case 2: return settings.scaledContentSize(30)
-            case 3: return settings.scaledContentSize(26)
-            default: return settings.scaledContentSize(24)
-            }
-        default:
-            return settings.scaledContentSize(24)
-        }
-    }
-
-    private var lineSpacing: CGFloat {
-        style == .code ? 3 : 5
-    }
-
-    private var textStyle: HierarchicalShapeStyle {
-        style == .quote ? .secondary : .primary
-    }
-
-    @ViewBuilder
-    private var backgroundStyle: some View {
-        switch style {
-        case .code:
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.secondary.opacity(0.08))
-        default:
-            Color.clear
-        }
-    }
-}
-
-private struct InlineCachedImage: View {
-    let url: URL
-    let preferredSize: CGFloat?
-    let onTap: (URL) -> Void
-
-    var body: some View {
-        CachedRemoteImage(url: url) { image in
-            Button {
-                onTap(url)
-            } label: {
-                Image(uiImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .antialiased(true)
-                    .scaledToFit()
-                    .frame(width: renderedSize(for: image).width, height: renderedSize(for: image).height)
-                    .clipShape(RoundedRectangle(cornerRadius: imageCornerRadius(for: image)))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("查看图片")
-        } placeholder: {
-            ProgressView()
-                .controlSize(.mini)
-                .frame(width: 24, height: 24)
-        }
-    }
-
-    private func renderedSize(for image: UIImage) -> CGSize {
-        let naturalSize = image.size
-        guard naturalSize.width > 0, naturalSize.height > 0 else {
-            return CGSize(width: 24, height: 24)
-        }
-
-        if let preferredSize {
-            let scale = preferredSize / max(naturalSize.width, naturalSize.height)
-            return CGSize(width: naturalSize.width * scale, height: naturalSize.height * scale)
-        }
-
-        if max(naturalSize.width, naturalSize.height) <= 128 {
-            return naturalSize
-        }
-
-        let width = maxContentImageWidth
-        let scale = width / naturalSize.width
-        return CGSize(width: width, height: naturalSize.height * scale)
-    }
-
-    private var maxContentImageWidth: CGFloat {
-        max(120, UIScreen.main.bounds.width - 60)
-    }
-
-    private func imageCornerRadius(for image: UIImage) -> CGFloat {
-        let size = renderedSize(for: image)
-        return min(size.width, size.height) > 64 ? 8 : 0
-    }
-}
-
-private struct InlineLineBreakKey: LayoutValueKey {
-    static let defaultValue = false
-}
-
-private struct InlineFlowLayout: Layout {
-    let horizontalSpacing: CGFloat
-    let verticalSpacing: CGFloat
-
-    func sizeThatFits(
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout Void
-    ) -> CGSize {
-        let maxWidth = proposal.width ?? UIScreen.main.bounds.width
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var lineHeight: CGFloat = 0
-
-        for subview in subviews {
-            if subview[InlineLineBreakKey.self] {
-                y += max(lineHeight, subview.sizeThatFits(.unspecified).height) + verticalSpacing
-                x = 0
-                lineHeight = 0
-                continue
-            }
-
-            let size = subview.sizeThatFits(.unspecified)
-            if x > 0, x + size.width > maxWidth {
-                y += lineHeight + verticalSpacing
-                x = 0
-                lineHeight = 0
-            }
-
-            x += size.width + horizontalSpacing
-            lineHeight = max(lineHeight, size.height)
-        }
-
-        return CGSize(width: maxWidth, height: y + lineHeight)
-    }
-
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout Void
-    ) {
-        let maxWidth = bounds.width
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var lineHeight: CGFloat = 0
-        var lineItems: [(index: Int, x: CGFloat, size: CGSize)] = []
-
-        func placeLine() {
-            for item in lineItems {
-                let subview = subviews[item.index]
-                subview.place(
-                    at: CGPoint(
-                        x: bounds.minX + item.x,
-                        y: bounds.minY + y + (lineHeight - item.size.height) / 2
-                    ),
-                    proposal: ProposedViewSize(item.size)
-                )
-            }
-            y += lineHeight + verticalSpacing
-            x = 0
-            lineHeight = 0
-            lineItems.removeAll(keepingCapacity: true)
-        }
-
-        for index in subviews.indices {
-            let subview = subviews[index]
-            if subview[InlineLineBreakKey.self] {
-                if lineItems.isEmpty {
-                    y += subview.sizeThatFits(.unspecified).height + verticalSpacing
-                } else {
-                    placeLine()
-                }
-                continue
-            }
-
-            let size = subview.sizeThatFits(.unspecified)
-            if x > 0, x + size.width > maxWidth {
-                placeLine()
-            }
-
-            lineItems.append((index, x, size))
-            x += size.width + horizontalSpacing
-            lineHeight = max(lineHeight, size.height)
-        }
-
-        if !lineItems.isEmpty {
-            for item in lineItems {
-                let subview = subviews[item.index]
-                subview.place(
-                    at: CGPoint(
-                        x: bounds.minX + item.x,
-                        y: bounds.minY + y + (lineHeight - item.size.height) / 2
-                    ),
-                    proposal: ProposedViewSize(item.size)
-                )
-            }
-        }
-    }
-}
-
-private struct InlineHTMLSnippetView: View {
-    @EnvironmentObject private var settings: SettingsStore
-
-    let html: String
-    let style: HTMLTextStyle
-    @State private var measuredHeight: CGFloat = 24
-
-    var body: some View {
-        AutoSizingHTMLWebView(
-            html: wrappedHTML,
-            measuredHeight: $measuredHeight
+    @MainActor
+    static func selectableAttributedText(
+        for html: String,
+        style: HTMLTextStyle,
+        settings: SettingsStore
+    ) -> NSAttributedString {
+        SelectableHTMLAttributedStringBuilder.attributedText(
+            for: html,
+            style: style,
+            settings: settings
         )
-        .frame(height: measuredHeight)
-        .padding(style == .code ? 10 : 0)
-        .padding(.leading, style == .quote ? 12 : 0)
-        .background(backgroundStyle)
-        .overlay(alignment: .leading) {
-            if style == .quote {
-                Rectangle()
-                    .fill(.quaternary)
-                    .frame(width: 3)
-                    .clipShape(Capsule())
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: style == .code ? 8 : 0))
     }
 
-    private var wrappedHTML: String {
-        """
-        <html>
-        <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-        <style>
-        html, body {
-            margin: 0;
-            padding: 0;
-            background: transparent;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-            font-size: \(fontSize)px;
-            font-weight: \(fontWeight);
-            line-height: \(lineHeight);
-            color: \(textColorHex);
-            word-break: break-word;
-            overflow-wrap: anywhere;
-        }
-        p, div, ul, ol, li, blockquote, pre, h1, h2, h3, h4, h5, h6 {
-            margin: 0;
-            padding: 0;
-        }
-        blockquote {
-            color: #6b7280;
-        }
-        pre {
-            white-space: pre-wrap;
-            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        }
-        ul, ol {
-            padding-left: 1.2em;
-        }
-        img {
-            max-width: 100%;
-            height: auto;
-            vertical-align: middle;
-        }
-        img.v2ex-inline-emoji {
-            width: 1.2em;
-            height: 1.2em;
-            max-width: 1.2em;
-            max-height: 1.2em;
-            object-fit: contain;
-            vertical-align: -0.18em;
-        }
-        img.embedded_image {
-            display: inline-block;
-            width: auto;
-            max-width: 100%;
-            height: auto;
-            object-fit: contain;
-            vertical-align: middle;
-            border-radius: 8px;
-        }
-        a {
-            color: #0a84ff;
-            text-decoration: none;
-        }
-        </style>
-        </head>
-        <body>\(html)</body>
-        </html>
-        """
-    }
-
-    private var fontSize: Int {
-        Int(settings.scaledContentSize(baseFontSize).rounded())
-    }
-
-    private var baseFontSize: CGFloat {
-        switch style {
-        case .body, .listItem, .quote:
-            return 17
-        case .code:
-            return 15
-        case .heading(let level):
-            switch level {
-            case 1: return 28
-            case 2: return 22
-            case 3: return 19
-            default: return 17
-            }
-        }
-    }
-
-    private var fontWeight: Int {
-        switch style {
-        case .heading:
-            return 600
-        default:
-            return 400
-        }
-    }
-
-    private var lineHeight: Double {
-        style == .code ? 1.4 : 1.55
-    }
-
-    private var textColorHex: String {
-        "#111111"
-    }
-
-    @ViewBuilder
-    private var backgroundStyle: some View {
-        switch style {
-        case .code:
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.secondary.opacity(0.08))
-        default:
-            Color.clear
-        }
-    }
-}
-
-private struct AutoSizingHTMLWebView: UIViewRepresentable {
-    let html: String
-    @Binding var measuredHeight: CGFloat
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(measuredHeight: $measuredHeight)
-    }
-
-    func makeUIView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.isOpaque = false
-        webView.backgroundColor = .clear
-        webView.scrollView.isScrollEnabled = false
-        webView.scrollView.backgroundColor = .clear
-        webView.navigationDelegate = context.coordinator
-        return webView
-    }
-
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        guard context.coordinator.lastHTML != html else { return }
-        context.coordinator.lastHTML = html
-        webView.loadHTMLString(html, baseURL: URL(string: "https://www.v2ex.com"))
-    }
-
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        @Binding var measuredHeight: CGFloat
-        var lastHTML: String = ""
-
-        init(measuredHeight: Binding<CGFloat>) {
-            _measuredHeight = measuredHeight
-        }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            measureHeight(in: webView)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak webView] in
-                guard let webView else { return }
-                self.measureHeight(in: webView)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak webView] in
-                guard let webView else { return }
-                self.measureHeight(in: webView)
-            }
-        }
-
-        private func measureHeight(in webView: WKWebView) {
-            let script = "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);"
-            webView.evaluateJavaScript(script) { result, _ in
-                guard let height = result as? CGFloat else { return }
-                DispatchQueue.main.async {
-                    self.measuredHeight = max(height, 24)
-                }
-            }
-        }
+    @MainActor
+    static func selectableContentKey(
+        for html: String,
+        style: HTMLTextStyle,
+        settings: SettingsStore
+    ) -> String {
+        "\(settings.contentFontScale)-\(style.cacheKey)-\(html)"
     }
 }
 
@@ -962,9 +948,18 @@ private struct HTMLImageView: View {
     let style: HTMLImageStyle
     let onTap: (URL) -> Void
 
+    @State private var imageActionMessage: ImageActionMessage?
+
     var body: some View {
         imageContent
             .frame(maxWidth: .infinity, alignment: .leading)
+            .alert(item: $imageActionMessage) { message in
+                Alert(
+                    title: Text(message.title),
+                    message: Text(message.message),
+                    dismissButton: .default(Text("好"))
+                )
+            }
     }
 
     @ViewBuilder
@@ -985,8 +980,42 @@ private struct HTMLImageView: View {
     private var renderedImage: some View {
         CachedRemoteImage(url: url) { image in
             loadedImage(image)
+                .contextMenu {
+                    imageActionMenu(for: image)
+                }
         } placeholder: {
             loadingPlaceholder
+        }
+    }
+
+    @ViewBuilder
+    private func imageActionMenu(for image: UIImage) -> some View {
+        Button {
+            Task {
+                await save(image)
+            }
+        } label: {
+            Label("保存图片", systemImage: "square.and.arrow.down")
+        }
+
+        Button {
+            UIPasteboard.general.string = url.absoluteString
+            imageActionMessage = ImageActionMessage(title: "已复制", message: "图片链接已复制。")
+        } label: {
+            Label("复制图片链接", systemImage: "link")
+        }
+
+        ShareLink(item: url) {
+            Label("分享图片", systemImage: "square.and.arrow.up")
+        }
+    }
+
+    private func save(_ image: UIImage) async {
+        do {
+            try await PhotoLibraryImageSaver.save(image)
+            imageActionMessage = ImageActionMessage(title: "已保存", message: "图片已保存到相册。")
+        } catch {
+            imageActionMessage = ImageActionMessage(title: "保存失败", message: error.localizedDescription)
         }
     }
 
@@ -1041,39 +1070,117 @@ private struct HTMLImageView: View {
 
 private struct NaturalSizeImage: View {
     let image: UIImage
+    @State private var containerWidth = max(120, UIScreen.main.bounds.width - 60)
 
     var body: some View {
+        let renderedSize = ImageDisplaySize.size(for: image.size, maxWidth: containerWidth)
+
         Image(uiImage: image)
             .resizable()
             .interpolation(.high)
             .antialiased(true)
-            .aspectRatio(aspectRatio, contentMode: .fit)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .scaledToFit()
+            .frame(width: renderedSize.width, height: renderedSize.height, alignment: .leading)
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: ImageContainerWidthPreferenceKey.self, value: proxy.size.width)
+                }
+            }
+            .onPreferenceChange(ImageContainerWidthPreferenceKey.self) { width in
+                guard width > 0, width != containerWidth else { return }
+                containerWidth = width
+            }
     }
+}
 
-    private var aspectRatio: CGFloat {
-        guard image.size.width > 0, image.size.height > 0 else {
-            return 1
+private struct ImageContainerWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let nextValue = nextValue()
+        if nextValue > 0 {
+            value = nextValue
         }
-        return image.size.width / image.size.height
+    }
+}
+
+private struct ImageActionMessage: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+private enum PhotoLibraryImageSaver {
+    static func save(_ image: UIImage) async throws {
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        let authorizedStatus: PHAuthorizationStatus
+        if status == .notDetermined {
+            authorizedStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        } else {
+            authorizedStatus = status
+        }
+
+        guard authorizedStatus == .authorized || authorizedStatus == .limited else {
+            throw PhotoLibraryImageSaveError.notAuthorized
+        }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            } completionHandler: { success, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: PhotoLibraryImageSaveError.saveFailed)
+                }
+            }
+        }
+    }
+}
+
+private enum PhotoLibraryImageSaveError: LocalizedError {
+    case notAuthorized
+    case saveFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .notAuthorized:
+            return "没有相册写入权限。请在系统设置中允许添加照片。"
+        case .saveFailed:
+            return "系统未能完成保存，请稍后再试。"
+        }
     }
 }
 
 private struct SelectedTopicImage: Identifiable {
-    let url: URL
+    let urls: [URL]
+    let index: Int
 
     var id: String {
-        url.absoluteString
+        let selectedURL = urls.indices.contains(index) ? urls[index].absoluteString : ""
+        return "\(index)-\(selectedURL)"
     }
 }
 
 private struct ImageViewer: View {
-    let imageURL: URL
+    let imageURLs: [URL]
 
     @Environment(\.dismiss) private var dismiss
+    @State private var currentIndex: Int
     @State private var image: UIImage?
     @State private var isLoading = true
+    @State private var imageActionMessage: ImageActionMessage?
+
+    init(imageURLs: [URL], initialIndex: Int) {
+        let safeURLs = imageURLs.isEmpty ? [] : imageURLs
+        self.imageURLs = safeURLs
+        _currentIndex = State(initialValue: min(max(initialIndex, 0), max(safeURLs.count - 1, 0)))
+    }
 
     var body: some View {
         ZStack {
@@ -1098,7 +1205,46 @@ private struct ImageViewer: View {
 
             VStack {
                 HStack {
+                    if imageURLs.count > 1 {
+                        Text("\(currentIndex + 1) / \(imageURLs.count)")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.45))
+                            .clipShape(Capsule())
+                    }
+
                     Spacer()
+
+                    if let currentURL {
+                        Button {
+                            Task {
+                                await saveCurrentImage()
+                            }
+                        } label: {
+                            Image(systemName: "square.and.arrow.down")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 36, height: 36)
+                                .background(.black.opacity(0.45))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("保存图片")
+
+                        ShareLink(item: currentURL) {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 36, height: 36)
+                                .background(.black.opacity(0.45))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("分享图片")
+                    }
+
                     Button {
                         dismiss()
                     } label: {
@@ -1116,12 +1262,131 @@ private struct ImageViewer: View {
 
                 Spacer()
             }
+
+            if canMoveBackward {
+                HStack {
+                    navigationButton(systemName: "chevron.left", action: moveBackward)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+            }
+
+            if canMoveForward {
+                HStack {
+                    Spacer()
+                    navigationButton(systemName: "chevron.right", action: moveForward)
+                }
+                .padding(.horizontal, 12)
+            }
         }
-        .task(id: imageURL) {
+        .gesture(
+            DragGesture(minimumDistance: 30)
+                .onEnded { value in
+                    guard imageURLs.count > 1 else { return }
+                    let horizontal = value.translation.width
+                    let vertical = value.translation.height
+                    guard abs(horizontal) > abs(vertical), abs(horizontal) > 80 else { return }
+                    if horizontal < 0 {
+                        moveForward()
+                    } else {
+                        moveBackward()
+                    }
+                }
+        )
+        .task(id: currentURL) {
             isLoading = true
-            image = await RemoteImageCache.shared.loadImage(for: imageURL)
+            image = nil
+            if let currentURL {
+                image = await RemoteImageCache.shared.loadImage(for: currentURL)
+            }
             isLoading = false
         }
+        .alert(item: $imageActionMessage) { message in
+            Alert(
+                title: Text(message.title),
+                message: Text(message.message),
+                dismissButton: .default(Text("好"))
+            )
+        }
+        .contextMenu {
+            if let image {
+                Button {
+                    Task {
+                        await save(image)
+                    }
+                } label: {
+                    Label("保存图片", systemImage: "square.and.arrow.down")
+                }
+            }
+
+            if let currentURL {
+                Button {
+                    UIPasteboard.general.string = currentURL.absoluteString
+                    imageActionMessage = ImageActionMessage(title: "已复制", message: "图片链接已复制。")
+                } label: {
+                    Label("复制图片链接", systemImage: "link")
+                }
+
+                ShareLink(item: currentURL) {
+                    Label("分享图片", systemImage: "square.and.arrow.up")
+                }
+            }
+        }
+    }
+
+    private var currentURL: URL? {
+        guard imageURLs.indices.contains(currentIndex) else {
+            return nil
+        }
+        return imageURLs[currentIndex]
+    }
+
+    private var canMoveBackward: Bool {
+        currentIndex > 0
+    }
+
+    private var canMoveForward: Bool {
+        currentIndex < imageURLs.count - 1
+    }
+
+    private func moveBackward() {
+        guard canMoveBackward else { return }
+        currentIndex -= 1
+    }
+
+    private func moveForward() {
+        guard canMoveForward else { return }
+        currentIndex += 1
+    }
+
+    private func saveCurrentImage() async {
+        guard let image else {
+            imageActionMessage = ImageActionMessage(title: "图片仍在加载", message: "请稍后再试。")
+            return
+        }
+        await save(image)
+    }
+
+    private func save(_ image: UIImage) async {
+        do {
+            try await PhotoLibraryImageSaver.save(image)
+            imageActionMessage = ImageActionMessage(title: "已保存", message: "图片已保存到相册。")
+        } catch {
+            imageActionMessage = ImageActionMessage(title: "保存失败", message: error.localizedDescription)
+        }
+    }
+
+    private func navigationButton(systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(.black.opacity(0.45))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(systemName == "chevron.left" ? "上一张图片" : "下一张图片")
     }
 }
 
@@ -1133,7 +1398,7 @@ private struct ZoomableImageView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
+        let scrollView = CenteredImageScrollView()
         scrollView.delegate = context.coordinator
         scrollView.minimumZoomScale = 1
         scrollView.maximumZoomScale = 5
@@ -1143,20 +1408,12 @@ private struct ZoomableImageView: UIViewRepresentable {
         scrollView.bouncesZoom = true
 
         let imageView = UIImageView(image: image)
-        imageView.contentMode = .scaleAspectFit
+        imageView.contentMode = .scaleToFill
         imageView.isUserInteractionEnabled = true
-        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.frame = CGRect(origin: .zero, size: image.size)
         scrollView.addSubview(imageView)
         context.coordinator.imageView = imageView
-
-        NSLayoutConstraint.activate([
-            imageView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
-            imageView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
-            imageView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-            imageView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-            imageView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
-            imageView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor)
-        ])
+        scrollView.centeredImageDelegate = context.coordinator
 
         let doubleTap = UITapGestureRecognizer(
             target: context.coordinator,
@@ -1171,14 +1428,70 @@ private struct ZoomableImageView: UIViewRepresentable {
 
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
         context.coordinator.imageView?.image = image
+        context.coordinator.updateImageLayout(in: scrollView, animated: false)
+    }
+
+    private final class CenteredImageScrollView: UIScrollView {
+        weak var centeredImageDelegate: Coordinator?
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            centeredImageDelegate?.updateImageLayout(in: self, animated: false)
+        }
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate {
         weak var scrollView: UIScrollView?
         weak var imageView: UIImageView?
+        private var lastBaseSize: CGSize = .zero
+        private var lastImageSize: CGSize = .zero
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             imageView
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            updateCentering(in: scrollView)
+        }
+
+        func updateImageLayout(in scrollView: UIScrollView, animated: Bool) {
+            guard let imageView,
+                  let image = imageView.image,
+                  scrollView.bounds.width > 0,
+                  scrollView.bounds.height > 0 else {
+                return
+            }
+
+            let baseSize = ImageDisplaySize.size(
+                for: image.size,
+                maxSize: scrollView.bounds.size
+            )
+            guard baseSize != lastBaseSize || image.size != lastImageSize else {
+                updateCentering(in: scrollView)
+                return
+            }
+
+            lastBaseSize = baseSize
+            lastImageSize = image.size
+            scrollView.setZoomScale(scrollView.minimumZoomScale, animated: animated)
+            imageView.frame = CGRect(origin: .zero, size: baseSize)
+            scrollView.contentSize = baseSize
+            updateCentering(in: scrollView)
+        }
+
+        private func updateCentering(in scrollView: UIScrollView) {
+            let width = imageView?.bounds.width ?? 0
+            let height = imageView?.bounds.height ?? 0
+            let scaledWidth = width * scrollView.zoomScale
+            let scaledHeight = height * scrollView.zoomScale
+            let horizontalInset = max(0, (scrollView.bounds.width - scaledWidth) / 2)
+            let verticalInset = max(0, (scrollView.bounds.height - scaledHeight) / 2)
+            scrollView.contentInset = UIEdgeInsets(
+                top: verticalInset,
+                left: horizontalInset,
+                bottom: verticalInset,
+                right: horizontalInset
+            )
         }
 
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
@@ -1206,5 +1519,22 @@ private struct ZoomableImageView: UIViewRepresentable {
 private extension String {
     var withCharacterBreakOpportunities: String {
         map(String.init).joined(separator: "\u{200B}")
+    }
+}
+
+private extension HTMLTextStyle {
+    var cacheKey: String {
+        switch self {
+        case .body:
+            return "body"
+        case .quote:
+            return "quote"
+        case .code:
+            return "code"
+        case .heading(let level):
+            return "heading-\(level)"
+        case .listItem:
+            return "list-item"
+        }
     }
 }

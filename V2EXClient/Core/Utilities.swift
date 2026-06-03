@@ -37,6 +37,36 @@ enum HTMLInlineRun: Equatable {
     case lineBreak
 }
 
+enum ImageDisplaySize {
+    static func size(for naturalSize: CGSize, maxWidth: CGFloat) -> CGSize {
+        guard naturalSize.width > 0, naturalSize.height > 0 else {
+            return CGSize(width: max(1, maxWidth), height: max(1, maxWidth))
+        }
+
+        let constrainedWidth = max(1, maxWidth)
+        guard naturalSize.width > constrainedWidth else {
+            return naturalSize
+        }
+
+        let scale = constrainedWidth / naturalSize.width
+        return CGSize(width: constrainedWidth, height: naturalSize.height * scale)
+    }
+
+    static func size(for naturalSize: CGSize, maxSize: CGSize) -> CGSize {
+        guard naturalSize.width > 0, naturalSize.height > 0 else {
+            let fallback = max(1, min(maxSize.width, maxSize.height))
+            return CGSize(width: fallback, height: fallback)
+        }
+
+        let constrainedWidth = max(1, maxSize.width)
+        let constrainedHeight = max(1, maxSize.height)
+        let widthScale = constrainedWidth / naturalSize.width
+        let heightScale = constrainedHeight / naturalSize.height
+        let scale = min(1, widthScale, heightScale)
+        return CGSize(width: naturalSize.width * scale, height: naturalSize.height * scale)
+    }
+}
+
 extension String {
     static func md5HexDigest(for value: String) -> String {
         let data = Data(value.utf8)
@@ -93,6 +123,40 @@ extension String {
         replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
             .decodedHTML
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var selectableHTMLFragment: String {
+        removingBlockImagesForSelectableText
+    }
+
+    private var removingBlockImagesForSelectableText: String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<img\b[^>]*\bsrc\s*=\s*(?:(['"])(.*?)\1|([^'">\s]+))[^>]*>"#,
+            options: [.caseInsensitive]
+        ) else {
+            return self
+        }
+
+        var result = ""
+        var cursor = startIndex
+        let nsRange = NSRange(startIndex..<endIndex, in: self)
+        for match in regex.matches(in: self, range: nsRange) {
+            guard let range = Range(match.range, in: self) else { continue }
+            result += String(self[cursor..<range.lowerBound])
+
+            let tagHTML = String(self[range])
+            let loweredTag = tagHTML.lowercased()
+            if loweredTag.contains("v2ex-inline-emoji")
+                || loweredTag.contains("v2ex-inline-image")
+                || loweredTag.contains("data-v2ex-inline-size") {
+                result += tagHTML
+            } else {
+                result += " "
+            }
+            cursor = range.upperBound
+        }
+        result += String(self[cursor...])
+        return result
     }
 
     var decodedHTMLEntitiesPreservingLineBreaks: String {
@@ -178,10 +242,17 @@ extension String {
                     blocks.append(.image(url, style: .content))
                 }
             case .embedded:
-                bufferedHTML += leadingHTML
-                appendTextBlock(from: bufferedHTML, into: &blocks)
-                bufferedHTML = ""
-                if let url = normalizedHTMLImageURL(from: rawSource) {
+                if let url = normalizedHTMLImageURL(from: rawSource),
+                   shouldRenderEmbeddedImageInline(leadingHTML: leadingHTML, bufferedHTML: bufferedHTML) {
+                    bufferedHTML += leadingHTML
+                    bufferedHTML += inlineImageHTMLTag(for: url, originalTagHTML: tagHTML, size: 24)
+                } else {
+                    bufferedHTML += leadingHTML
+                    appendTextBlock(from: bufferedHTML, into: &blocks)
+                    bufferedHTML = ""
+                    guard let url = normalizedHTMLImageURL(from: rawSource) else {
+                        break
+                    }
                     blocks.append(.image(url, style: .embedded))
                 }
             case .emoji(let size):
@@ -254,6 +325,11 @@ extension String {
 
     private func appendTextBlock(from html: String, into blocks: inout [HTMLRenderableBlock]) {
         blocks.append(contentsOf: structuredTextBlocks(from: html))
+    }
+
+    private func shouldRenderEmbeddedImageInline(leadingHTML: String, bufferedHTML: String) -> Bool {
+        let sameLinePrefix = (bufferedHTML + leadingHTML).htmlTailAfterLastVisualBreak
+        return !sameLinePrefix.readableHTMLText.normalizedWhitespace.isEmpty
     }
 
     private func inlineTextRuns(from html: String) -> [HTMLInlineRun] {
@@ -391,7 +467,8 @@ extension String {
                 let trimmed = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.readableHTMLText.isEmpty || trimmed.contains("<img") else { return }
                 if trimmed.isInlineEmojiOnlyHTMLFragment, !fragments.isEmpty {
-                    fragments[fragments.count - 1] += " \(trimmed)"
+                    fragments[fragments.count - 1] = fragments[fragments.count - 1]
+                        .appendingInlineEmojiHTMLFragment(trimmed)
                 } else {
                     fragments.append(trimmed)
                 }
@@ -492,7 +569,7 @@ extension String {
         }
 
         if loweredTag.contains("embedded_image") {
-            return .inline(size: nil)
+            return .embedded
         }
 
         return .content
@@ -620,6 +697,54 @@ private extension HTMLImageStyle {
 }
 
 private extension String {
+    var htmlTailAfterLastVisualBreak: String {
+        let pattern = #"(?is)(?:<br\s*/?>|</(?:p|div|li|blockquote|pre|h[1-6])\s*>)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return self
+        }
+
+        let nsRange = NSRange(startIndex..<endIndex, in: self)
+        guard let match = regex.matches(in: self, range: nsRange).last,
+              let range = Range(match.range, in: self) else {
+            return self
+        }
+
+        return String(self[range.upperBound...])
+    }
+
+    func appendingInlineEmojiHTMLFragment(_ fragment: String) -> String {
+        let inlineFragment = fragment.unwrappedInlineEmojiHTMLFragment
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?i)</(?:p|div|li|blockquote)\s*>\s*$"#,
+            options: []
+        ) else {
+            return "\(self) \(inlineFragment)"
+        }
+
+        let nsRange = NSRange(startIndex..<endIndex, in: self)
+        guard let match = regex.firstMatch(in: self, range: nsRange),
+              let range = Range(match.range, in: self) else {
+            return "\(self) \(inlineFragment)"
+        }
+
+        return String(self[..<range.lowerBound]) + " \(inlineFragment)" + String(self[range.lowerBound...])
+    }
+
+    private var unwrappedInlineEmojiHTMLFragment: String {
+        trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(
+                of: #"(?is)^\s*<p[^>]*>\s*(.*?)\s*</p\s*>\s*$"#,
+                with: "$1",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?is)^\s*<div[^>]*>\s*(.*?)\s*</div\s*>\s*$"#,
+                with: "$1",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var isInlineEmojiOnlyHTMLFragment: Bool {
         guard range(of: #"(?i)<img\b(?=[^>]*\bv2ex-inline-(?:emoji|image)\b)[^>]*>"#, options: .regularExpression) != nil else {
             return false

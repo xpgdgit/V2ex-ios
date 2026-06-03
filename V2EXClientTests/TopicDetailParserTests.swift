@@ -238,6 +238,72 @@ final class TopicDetailParserTests: XCTestCase {
         XCTAssertTrue(text.contains("好用吗"))
     }
 
+    func testSelectableHTMLFragmentKeepsInlineImagesButStripsBlockImages() {
+        let html = #"文字 <a href="https://example.com">链接</a> <img src="//cdn.v2ex.com/emoji/smile.png" width="48" height="48"> 继续"#
+        let renderableHTML = html.renderableHTMLBlocks.compactMap { block -> String? in
+            if case .text(let html, _) = block {
+                return html
+            }
+            return nil
+        }.joined()
+
+        let selectableHTML = renderableHTML.selectableHTMLFragment
+
+        XCTAssertTrue(selectableHTML.contains("v2ex-inline-emoji"))
+        XCTAssertTrue(selectableHTML.contains("data-v2ex-inline-size=\"24\""))
+        XCTAssertTrue(selectableHTML.contains(#"<a href="https://example.com">链接</a>"#))
+        XCTAssertEqual(selectableHTML.readableHTMLText.normalizedWhitespace, "文字 链接 继续")
+    }
+
+    func testSelectableHTMLFragmentStripsNonInlineImages() {
+        let html = #"文字 <img src="//cdn.v2ex.com/content/chart.png" class="embedded_image"> 继续"#
+
+        let selectableHTML = html.selectableHTMLFragment
+
+        XCTAssertFalse(selectableHTML.contains("<img"))
+        XCTAssertFalse(selectableHTML.contains("chart.png"))
+        XCTAssertEqual(selectableHTML.readableHTMLText.normalizedWhitespace, "文字 继续")
+    }
+
+    func testImageDisplaySizeKeepsSmallImagesAtNaturalSize() {
+        let size = ImageDisplaySize.size(for: CGSize(width: 120, height: 120), maxWidth: 360)
+
+        XCTAssertEqual(size, CGSize(width: 120, height: 120))
+    }
+
+    func testImageDisplaySizeShrinksLargeImagesToFitWidth() {
+        let size = ImageDisplaySize.size(for: CGSize(width: 1200, height: 600), maxWidth: 360)
+
+        XCTAssertEqual(size, CGSize(width: 360, height: 180))
+    }
+
+    func testImageDisplaySizeWithMaxSizeKeepsSmallImagesAtNaturalSize() {
+        let size = ImageDisplaySize.size(
+            for: CGSize(width: 120, height: 120),
+            maxSize: CGSize(width: 390, height: 760)
+        )
+
+        XCTAssertEqual(size, CGSize(width: 120, height: 120))
+    }
+
+    func testImageDisplaySizeWithMaxSizeShrinksWideImagesToFit() {
+        let size = ImageDisplaySize.size(
+            for: CGSize(width: 1200, height: 600),
+            maxSize: CGSize(width: 390, height: 760)
+        )
+
+        XCTAssertEqual(size, CGSize(width: 390, height: 195))
+    }
+
+    func testImageDisplaySizeWithMaxSizeShrinksTallImagesToFit() {
+        let size = ImageDisplaySize.size(
+            for: CGSize(width: 600, height: 1200),
+            maxSize: CGSize(width: 390, height: 760)
+        )
+
+        XCTAssertEqual(size, CGSize(width: 380, height: 760))
+    }
+
     func testInlineHTMLRunsAttachSmallImageAfterBreakToPreviousText() {
         let html = #"有没有人用 comose<br><img src="//cdn.v2ex.com/emoji/smile.png" width="48" height="48">"#
 
@@ -268,6 +334,8 @@ final class TopicDetailParserTests: XCTestCase {
         guard case .text(let html, _) = blocks[0] else {
             return XCTFail("Expected a text block")
         }
+        XCTAssertTrue(html.contains(#"comose <img class="v2ex-inline-emoji""#))
+        XCTAssertFalse(html.contains(#"</p> <p><img"#))
 
         let runs = html.inlineHTMLRuns
         guard let imageIndex = runs.firstIndex(where: {
@@ -285,32 +353,30 @@ final class TopicDetailParserTests: XCTestCase {
         }
     }
 
-    func testRenderableBlocksKeepEmbeddedImagesInInlineFlow() {
-        let html = #"有没没人用 comose<a target="_blank" href="https://i.imgur.com/Iy0taMy.png" rel="nofollow noopener"><img src="https://i.imgur.com/Iy0taMy.png" class="embedded_image" rel="noreferrer"></a>"#
+    func testRenderableBlocksSplitEmbeddedImagesIntoImageBlocks() {
+        let html = #"有没没人用 comose<br><a target="_blank" href="https://i.imgur.com/Iy0taMy.png" rel="nofollow noopener"><img src="https://i.imgur.com/Iy0taMy.png" class="embedded_image" rel="noreferrer"></a>"#
+
+        let blocks = html.renderableHTMLBlocks
+
+        XCTAssertEqual(blocks.count, 2)
+        XCTAssertEqual(blocks[0].plainText, "有没没人用 comose")
+        XCTAssertEqual(blocks[1], .image(URL(string: "https://i.imgur.com/Iy0taMy.png")!, style: .embedded))
+    }
+
+    func testRenderableBlocksKeepSameLineEmbeddedImagesInTextFlow() {
+        let html = #"<a target="_blank" href="https://snaptium.com/" rel="nofollow noopener">https://snaptium.com/</a><br />官网上线了，就差产品发布正式版了。<a target="_blank" href="https://i.imgur.com/io2SM1h.png" rel="nofollow noopener"><img src="https://i.imgur.com/io2SM1h.png" class="embedded_image" rel="noreferrer"></a>"#
 
         let blocks = html.renderableHTMLBlocks
 
         XCTAssertEqual(blocks.count, 1)
-        XCTAssertEqual(blocks[0].plainText, "有没没人用 comose")
+        XCTAssertEqual(blocks[0].plainText, "https://snaptium.com/\n官网上线了，就差产品发布正式版了。")
 
         guard case .text(let html, _) = blocks[0] else {
-            return XCTFail("Expected embedded image to stay with the text block")
+            return XCTFail("Expected inline embedded image to stay in text block")
         }
-
-        let runs = html.inlineHTMLRuns
-        guard let imageIndex = runs.firstIndex(where: {
-            if case .image = $0 {
-                return true
-            }
-            return false
-        }) else {
-            return XCTFail("Expected an image run")
-        }
-
-        XCTAssertGreaterThan(imageIndex, 0)
-        if case .lineBreak = runs[imageIndex - 1] {
-            XCTFail("Embedded image should not force a line break when it fits inline")
-        }
+        XCTAssertTrue(html.contains("v2ex-inline-image"))
+        XCTAssertTrue(html.contains("https://i.imgur.com/io2SM1h.png"))
+        XCTAssertFalse(html.contains(#"<img src="https://i.imgur.com/io2SM1h.png" class="embedded_image""#))
     }
 
     func testRenderableBlocksSplitParagraphs() {
